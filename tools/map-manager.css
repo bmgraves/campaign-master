@@ -56,6 +56,35 @@
 .cm-panel-header button:hover    { background: #333; color: #fff; }
 .cm-panel-header button.active   { background: #1a3a1a; border-color: #4a7c4e; color: #6dbf72; }
 
+/* ── Map Config button ── */
+.cm-map-config-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.cm-map-config-btn {
+  width: 100%;
+  padding: 7px 12px;
+  background: #1a1f2e;
+  border: 1px solid #3a4a70;
+  border-radius: 5px;
+  color: #7090cc;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.cm-map-config-btn:hover {
+  background: #222840;
+  border-color: #5070bb;
+  color: #90b0ee;
+}
+
 /* ── Section labels ── */
 .cm-section-label {
   padding: 6px 12px 4px;
@@ -103,6 +132,7 @@
   text-overflow: ellipsis;
 }
 
+.cm-edit-type,
 .cm-delete-type {
   background: none;
   border: none;
@@ -114,7 +144,9 @@
   opacity: 0;
   transition: opacity 0.1s, color 0.1s;
 }
+.cm-type-row:hover .cm-edit-type,
 .cm-type-row:hover .cm-delete-type { opacity: 1; }
+.cm-edit-type:hover                 { color: #7090cc; }
 .cm-delete-type:hover               { color: #e07070; }
 
 .cm-empty {
@@ -173,6 +205,21 @@
   transition: background 0.15s;
 }
 .cm-add-row button:hover { background: #2a4a2a; }
+
+/* ── Hard borders row ── */
+.cm-hard-borders-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 16px 7px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.cm-hint {
+  font-size: 10px;
+  color: #555;
+  font-style: italic;
+}
 
 /* ── Brush size ── */
 .cm-brush-row {

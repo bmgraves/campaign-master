@@ -59,6 +59,12 @@ function _panelHTML() {
     </div>
   </div>
 
+  <div class="cm-map-config-row">
+    <button id="cm-map-config" class="cm-map-config-btn">
+      <i class="fa-solid fa-gear"></i> Map Config
+    </button>
+  </div>
+
   <div class="cm-section-label">Terrain Types</div>
   <div id="cm-terrain-type-list" class="cm-type-list"></div>
   <div class="cm-add-row">
@@ -103,6 +109,18 @@ function _panelHTML() {
     <label class="cm-checkbox-row">
       <input type="checkbox" id="cm-erase-region" ${MM.eraseRegion ? "checked" : ""}>
       <span>Region</span>
+    </label>
+  </div>
+
+  <div class="cm-hard-borders-row">
+    <span class="cm-hint">Hard borders:</span>
+    <label class="cm-checkbox-row">
+      <input type="checkbox" id="cm-hard-terrain" ${MM.hardTerrainBorders ? "checked" : ""}>
+      <span>Terrain</span>
+    </label>
+    <label class="cm-checkbox-row">
+      <input type="checkbox" id="cm-hard-borders" ${MM.hardBorders ? "checked" : ""}>
+      <span>Regions</span>
     </label>
   </div>
 
@@ -200,14 +218,24 @@ function _bindEvents(panel) {
     MM.eraseRegion = e.target.checked;
   });
 
-  // Terrain type list — click to select, trash to delete
+  // Hard borders
+  panel.querySelector("#cm-hard-terrain").addEventListener("change", (e) => {
+    MM.hardTerrainBorders = e.target.checked;
+  });
+  panel.querySelector("#cm-hard-borders").addEventListener("change", (e) => {
+    MM.hardBorders = e.target.checked;
+  });
+
+  // Terrain type list — click to select, edit, or trash
   panel.querySelector("#cm-terrain-type-list").addEventListener("click", (e) => {
     const row = e.target.closest(".cm-type-row");
     if (!row) return;
     if (e.target.closest(".cm-delete-type")) {
       _deleteTerrainType(row.dataset.id, panel); return;
     }
-    // Toggle selection
+    if (e.target.closest(".cm-edit-type")) {
+      _editTerrainType(row.dataset.id, panel); return;
+    }
     MM.activeTerrainId = MM.activeTerrainId === row.dataset.id ? null : row.dataset.id;
     MM.erasing = false;
     startPainting();
@@ -217,12 +245,15 @@ function _bindEvents(panel) {
     _refreshActiveLabel(panel);
   });
 
-  // Region list — click to select, trash to delete
+  // Region list — click to select, edit, or trash
   panel.querySelector("#cm-region-list").addEventListener("click", (e) => {
     const row = e.target.closest(".cm-type-row");
     if (!row) return;
     if (e.target.closest(".cm-delete-type")) {
       _deleteRegion(row.dataset.id, panel); return;
+    }
+    if (e.target.closest(".cm-edit-type")) {
+      _editRegion(row.dataset.id, panel); return;
     }
     MM.activeRegionId = MM.activeRegionId === row.dataset.id ? null : row.dataset.id;
     MM.erasing = false;
@@ -247,12 +278,23 @@ function _bindEvents(panel) {
       no: () => null,
     });
     if (!confirmed) return;
-    clearTimeout(null);
     MM._pendingTerrain = null;
     MM._pendingRegion  = null;
-    MM._isPainting     = false;
-    if (confirmed.terrain) { await setSceneFlag("terrainCells", {}); renderTerrainOverlay({}); }
-    if (confirmed.region)  { await setSceneFlag("regionCells",  {}); renderRegionOverlay({}); }
+    // Use {} (not null) so _initPendingCells treats the cleared state as its
+    // baseline even before the server confirms the save.
+    if (confirmed.terrain) MM._sentTerrain = {};
+    if (confirmed.region)  MM._sentRegion  = {};
+    MM._isPainting = false;
+    const clears = [];
+    if (confirmed.terrain) {
+      clears.push(setSceneFlag("terrainCells", {}));
+      renderTerrainOverlay({});
+    }
+    if (confirmed.region) {
+      clears.push(setSceneFlag("regionCells", {}));
+      renderRegionOverlay({});
+    }
+    await Promise.all(clears);
   });
 }
 
@@ -286,6 +328,7 @@ function _typeRowHTML(item, activeId) {
     <div class="cm-type-row${sel}" data-id="${item.id}">
       <span class="cm-type-swatch" style="background:${item.color}"></span>
       <span class="cm-type-name">${item.name}</span>
+      <button class="cm-edit-type"   title="Edit"><i class="fa-solid fa-pen"></i></button>
       <button class="cm-delete-type" title="Delete"><i class="fa-solid fa-trash"></i></button>
     </div>`;
 }
@@ -293,7 +336,7 @@ function _typeRowHTML(item, activeId) {
 function _updateBrushDisplay(panel) {
   const s = MM.brushSize;
   panel.querySelector("#cm-brush-size").textContent  = s;
-  panel.querySelector(".cm-brush-label").textContent = `cell${s !== 1 ? "s" : ""}`;
+  panel.querySelector(".cm-brush-row .cm-brush-label").textContent = `cell${s !== 1 ? "s" : ""}`;
   panel.querySelector("#cm-brush-dec").disabled = s <= 1;
   panel.querySelector("#cm-brush-inc").disabled = s >= 5;
 }
@@ -326,22 +369,77 @@ function _refreshActiveLabel(panel) {
 }
 
 function _ensureVisible(panel) {
-  let changed = false;
   if (!MM.terrainVisible) {
     MM.terrainVisible = true;
     game.settings.set(MODULE_ID, "terrainVisible", true);
     if (MM.terrainGfx) MM.terrainGfx.visible = true;
     panel?.querySelector("#cm-toggle-terrain-vis")?.classList.add("active");
-    changed = true;
   }
   if (!MM.regionVisible) {
     MM.regionVisible = true;
     game.settings.set(MODULE_ID, "regionVisible", true);
     if (MM.regionGfx) MM.regionGfx.visible = true;
     panel?.querySelector("#cm-toggle-region-vis")?.classList.add("active");
-    changed = true;
   }
-  return changed;
+}
+
+// ── Edit handlers ─────────────────────────────────────────────────────────────
+
+function _showEditDialog(title, currentName, currentColor) {
+  return new Promise((resolve) => {
+    new Dialog({
+      title,
+      content: `<div style="display:grid;grid-template-columns:auto 1fr;gap:8px 12px;align-items:center;padding:4px 0 8px">
+        <label>Name</label>
+        <input id="dlg-edit-name" type="text" value="${currentName.replace(/"/g, "&quot;")}" style="width:100%">
+        <label>Color</label>
+        <input id="dlg-edit-color" type="color" value="${currentColor}">
+      </div>`,
+      buttons: {
+        save: {
+          icon:     '<i class="fa-solid fa-check"></i>',
+          label:    "Save",
+          callback: (html) => resolve({
+            name:  html.find("#dlg-edit-name")[0].value.trim(),
+            color: html.find("#dlg-edit-color")[0].value,
+          }),
+        },
+        cancel: {
+          icon:     '<i class="fa-solid fa-times"></i>',
+          label:    "Cancel",
+          callback: () => resolve(null),
+        },
+      },
+      default: "save",
+      close:   () => resolve(null),
+    }).render(true);
+  });
+}
+
+async function _editTerrainType(id, panel) {
+  const type = getTerrainTypes()[id];
+  if (!type) return;
+  const result = await _showEditDialog(`Edit Terrain: ${type.name}`, type.name, type.color);
+  if (!result?.name) return;
+  const updated = foundry.utils.deepClone(getTerrainTypes());
+  updated[id] = { ...updated[id], name: result.name, color: result.color };
+  await setSceneFlag("terrainTypes", updated);
+  _refreshTerrainList(panel);
+  _refreshActiveLabel(panel);
+  renderTerrainOverlay();
+}
+
+async function _editRegion(id, panel) {
+  const region = getRegions()[id];
+  if (!region) return;
+  const result = await _showEditDialog(`Edit Region: ${region.name}`, region.name, region.color);
+  if (!result?.name) return;
+  const updated = foundry.utils.deepClone(getRegions());
+  updated[id] = { ...updated[id], name: result.name, color: result.color };
+  await setSceneFlag("regions", updated);
+  _refreshRegionList(panel);
+  _refreshActiveLabel(panel);
+  renderRegionOverlay();
 }
 
 // ── Delete handlers ───────────────────────────────────────────────────────────
@@ -351,7 +449,6 @@ async function _deleteTerrainType(id, panel) {
   delete types[id];
   await setSceneFlag("terrainTypes", types);
 
-  // Remove cells painted with this type
   const cells = foundry.utils.deepClone(getTerrainCells());
   for (const [key, typeId] of Object.entries(cells)) {
     if (typeId === id) delete cells[key];
@@ -369,7 +466,6 @@ async function _deleteRegion(id, panel) {
   delete regions[id];
   await setSceneFlag("regions", regions);
 
-  // Remove cells assigned to this region
   const cells = foundry.utils.deepClone(getRegionCells());
   for (const [key, regionId] of Object.entries(cells)) {
     if (regionId === id) delete cells[key];
