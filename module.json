@@ -1,0 +1,25 @@
+{
+  "id": "campaign-master",
+  "title": "Campaign Master",
+  "description": "Hex grid utilities for FoundryVTT — hex hover highlighting, token movement tracking, and more.",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "authors": [
+    {
+      "name": "You"
+    }
+  ],
+  "esmodules": [
+    "campaign-master.js"
+  ],
+  "styles": [
+    "campaign-master.css"
+  ],
+  "languages": [],
+  "url": "",
+  "manifest": "",
+  "download": ""
+}
