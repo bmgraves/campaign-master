@@ -340,21 +340,47 @@ export function getResolvedConfig(i, j) {
     ...(hexCfg.tags     ?? []).map(t => ({ tag: t, from: "Hex" })),
   ];
 
-  // Encounter: Map uses data-presence; sub-levels require override:true
-  const _hasEnc = (e, isMap) => isMap
-    ? !!(e?.uuid || e?.die || e?.threshold)
-    : e?.override === true && !!(e?.uuid || e?.die || e?.threshold);
-  let encounter = null, inheritedFrom = null;
-  if (_hasEnc(mapCfg.encounter,     true))  { encounter = { ...mapCfg.encounter };     inheritedFrom = "Map";     }
-  if (_hasEnc(terrainCfg.encounter, false)) { encounter = { ...terrainCfg.encounter }; inheritedFrom = "Terrain"; }
-  if (_hasEnc(regionCfg.encounter,  false)) { encounter = { ...regionCfg.encounter };  inheritedFrom = "Region";  }
-  if (_hasEnc(hexCfg.encounter,     false)) { encounter = { ...hexCfg.encounter };     inheritedFrom = "Hex";     }
+  // Migration helper: old encounter:{} → encounters:[{type:"primary",...}]
+  const _getEncs = (cfg) => {
+    if (Array.isArray(cfg.encounters)) return cfg.encounters;
+    const e = cfg.encounter;
+    if (e && (e.uuid || e.die || e.threshold)) return [{ type: "primary", ...e }];
+    return [];
+  };
+
+  const levels = [
+    { cfg: mapCfg,     from: "Map",     isMap: true  },
+    { cfg: terrainCfg, from: "Terrain", isMap: false },
+    { cfg: regionCfg,  from: "Region",  isMap: false },
+    { cfg: hexCfg,     from: "Hex",     isMap: false },
+  ];
+
+  let primary = null;
+  const subtables   = [];
+  const secondaries = [];
+
+  for (const { cfg, from, isMap } of levels) {
+    for (const enc of _getEncs(cfg)) {
+      if (enc.type === "primary") {
+        const active = isMap
+          ? !!(enc.uuid || enc.die)
+          : enc.override === true && !!(enc.uuid || enc.die);
+        if (active) primary = { ...enc, inheritedFrom: from };
+      } else if (enc.type === "subtable") {
+        if (enc.uuid && enc.keyword) subtables.push({ ...enc, inheritedFrom: from });
+      } else if (enc.type === "secondary") {
+        if (enc.uuid || enc.die) secondaries.push({ ...enc, inheritedFrom: from });
+      }
+    }
+  }
 
   return {
-    hexName:        hexCfg.name || null,
-    tags:           tagsWithSource.map(t => t.tag),
+    hexName:       hexCfg.name || null,
+    tags:          tagsWithSource.map(t => t.tag),
     tagsWithSource,
-    encounter:      encounter ? { ...encounter, inheritedFrom } : null,
+    primary,
+    subtables,
+    secondaries,
   };
 }
 

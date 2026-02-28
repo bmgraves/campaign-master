@@ -49,7 +49,7 @@ export function startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedC
       ? `<div><span style="color:#777;">Tags:</span> ${tags.map(t => `<span style="background:#1a2a3a;border:1px solid #3a5a7a;border-radius:10px;padding:1px 7px;font-size:11px;color:#7ab0dd;">${t}</span>`).join(" ")}</div>`
       : "";
 
-    const enc = resolved?.encounter ?? null;
+    const enc = resolved?.primary ?? null;
     let encLine = "";
     if (enc?.uuid) {
       const doc      = fromUuidSync(enc.uuid);

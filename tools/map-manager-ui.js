@@ -479,36 +479,69 @@ async function _editRegion(id, panel) {
 // ── Config dialog ─────────────────────────────────────────────────────────────
 // _showConfigDialog(title, name, color, data, parentChain, currentLabel)
 //   name/color: string — shown for terrain/region edits; pass null for hex/map-only dialogs
-//   data: { tags, encounter } — the current config for this level
+//   data: { tags, encounters[] } — the current config for this level
 //   parentChain: [{label, config}] — parent configs in order (Map first)
 //   currentLabel: "Terrain"|"Region"|"Hex"|null — null = Map level (no override concept)
 //
-// Encounter inheritance chain:
-//   Map (data-presence) → Terrain/Region/Hex (require override:true)
-//   Chain display: [Map] → [nodes with override] → [current if override checked]
-//   Active node (inherited source) = last node before current (or current if override=true)
+// Encounter inheritance:
+//   Primary: override chain (Map always active; sub-levels require override:true)
+//   Sub-Table: keyword matching, additive from all levels
+//   Secondary: independent, additive from all levels
+
+// Read row data out of a .cm-enc-row element
+function _readRowData(row) {
+  const type = row.querySelector(".cm-enc-type")?.value ?? "secondary";
+  const uuid = row.querySelector(".cm-enc-uuid")?.value.trim() ?? "";
+  if (type === "subtable") {
+    return { type, uuid, keyword: row.querySelector(".cm-enc-keyword")?.value.trim() ?? "" };
+  }
+  const frequency = row.querySelector(".cm-enc-trigger")?.value ?? "daily";
+  return {
+    type,
+    uuid,
+    frequency,
+    die:       row.querySelector(".cm-enc-die")?.value.trim()           ?? "",
+    threshold: row.querySelector(".cm-enc-threshold")?.value.trim()     ?? "",
+    checkHour: parseInt(row.querySelector(".cm-enc-checkhour")?.value)  || 6,
+  };
+}
 
 function _showConfigDialog(title, name, color, data = {}, parentChain = [], currentLabel = null) {
   const tags       = data.tags ?? [];
-  const thisEnc    = data.encounter ?? {};
   const hasName    = name !== null && name !== undefined;
   const isMapLevel = !currentLabel;
   const isHexLevel = !hasName && !!currentLabel;
 
-  // Override is "on" if this level explicitly overrides, or it's the map level
-  const isOverrideInit = isMapLevel ? true : (thisEnc.override === true);
+  // Migration: old encounter:{} → encounters:[{type:"primary",...}]
+  function _localGetEncounters(cfg) {
+    if (!cfg) return [];
+    if (Array.isArray(cfg.encounters)) return cfg.encounters;
+    const e = cfg.encounter;
+    if (e && (e.uuid || e.die || e.threshold)) return [{ type: "primary", ...e }];
+    return [];
+  }
 
-  // Compute inherited encounter: most-specific parent with data
-  // Map = data-presence; sub-levels = override===true + data
-  let inheritedEnc = null;
-  for (const p of parentChain) {
-    const pEnc = p.config?.encounter;
-    if (!pEnc) continue;
-    const isMap   = p.label === "Map";
-    const hasData = isMap
-      ? !!(pEnc.uuid || pEnc.die || pEnc.threshold)
-      : pEnc.override === true && !!(pEnc.uuid || pEnc.die || pEnc.threshold);
-    if (hasData) inheritedEnc = pEnc;
+  const thisEncounters = _localGetEncounters(data);
+
+  // Does this level already have a primary with override (or map level)?
+  const isOverrideInit = isMapLevel
+    ? true
+    : thisEncounters.some(e => e.type === "primary" && e.override === true && !!(e.uuid || e.die));
+
+  // Inherited primary: most-specific parent with an active primary
+  let inheritedPrimary = null;
+  if (!isMapLevel) {
+    for (const p of parentChain) {
+      if (!p.config || p.phantom) continue;
+      const isMap = p.label === "Map";
+      for (const enc of _localGetEncounters(p.config)) {
+        if (enc.type !== "primary") continue;
+        const active = isMap
+          ? !!(enc.uuid || enc.die)
+          : enc.override === true && !!(enc.uuid || enc.die);
+        if (active) inheritedPrimary = { ...enc, inheritedFrom: p.label };
+      }
+    }
   }
 
   const inheritedTags = parentChain.flatMap(p =>
@@ -541,55 +574,40 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
       <button id="dlg-tag-add" type="button">+</button>
     </div>`;
 
-  const overrideRow = !isMapLevel ? `
-    <div class="cm-config-override">
-      <input type="checkbox" id="dlg-enc-override" ${isOverrideInit ? "checked" : ""}>
-      <label for="dlg-enc-override">Override encounter</label>
-    </div>` : "";
-
   const hoursPerDayRow = isMapLevel ? `
     <div class="cm-config-row"><label>Hours per Day</label>
       <input id="dlg-hours-per-day" type="number" min="1" max="48" step="1"
         value="${data.hoursPerDay ?? 24}">
-    </div>
-    <div class="cm-config-row"><label>Daily Check Hour</label>
-      <input id="dlg-daily-check-hour" type="number" min="0" max="47" step="1"
-        value="${data.dailyCheckHour ?? 6}"
-        title="Hour of day (0–hoursPerDay−1) when daily encounter checks fire">
     </div>` : "";
 
-  // Encounter fields — values and disabled state set dynamically in render callback
-  const encFields = `
-    <div id="dlg-enc-fields">
-      <div class="cm-config-row"><label>Table/Macro UUID</label>
-        <input id="dlg-enc-uuid" type="text" placeholder="Drag to link or paste UUID" value="">
-      </div>
-      <div class="cm-config-row"><label>Frequency</label>
-        <select id="dlg-enc-freq">
-          <option value="daily">Daily</option>
-          <option value="entering">Entering Hex</option>
-          <option value="leaving">Leaving Hex</option>
-        </select>
-      </div>
-      <div class="cm-config-row"><label>Encounter Die</label>
-        <input id="dlg-enc-die" type="text" placeholder="1d6" value="">
-      </div>
-      <div class="cm-config-row"><label>Encounter Threshold</label>
-        <input id="dlg-enc-threshold" type="text" placeholder="1,2 or 1-3" value="">
-      </div>
-    </div>`;
+  const chainDisplay = !isMapLevel ? `
+    <div id="dlg-chain-display" class="cm-chain-display"></div>
+    ${parentChain.some(p => p.phantom) ? '<div class="cm-chain-note">Terrain inheritance uncertain in configuration</div>' : ""}
+  ` : "";
+
+  const inheritedPrimaryHtml = !isMapLevel
+    ? `<div id="dlg-inherited-primary" class="cm-inherited-primary"></div>` : "";
+
+  const overrideRow = !isMapLevel ? `
+    <div class="cm-config-override">
+      <input type="checkbox" id="dlg-enc-override" ${isOverrideInit ? "checked" : ""}>
+      <label for="dlg-enc-override">Override primary encounter</label>
+    </div>` : "";
 
   const content = `<div class="cm-config-dialog">
     ${nameRow}
     ${hexNameRow}
     ${tagsSection}
-    <div class="cm-config-section-title">Encounter Manager</div>
+    <div class="cm-config-section-title">Encounter Tables</div>
     <div class="cm-encounter-section">
       ${hoursPerDayRow}
-      <div id="dlg-chain-display" class="cm-chain-display"></div>
-      ${parentChain.some(p => p.phantom) ? `<div class="cm-chain-note">Terrain inheritance uncertain in configuration</div>` : ""}
+      ${chainDisplay}
+      ${inheritedPrimaryHtml}
       ${overrideRow}
-      ${encFields}
+      <div id="dlg-enc-list" class="cm-enc-list"></div>
+      <button id="dlg-enc-add" type="button" class="cm-enc-add-btn">
+        <i class="fa-solid fa-plus"></i> Add Encounter Entry
+      </button>
     </div>
   </div>`;
 
@@ -597,31 +615,32 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
     const dlg = new Dialog({
       title,
       content,
+      width: 560,
       buttons: {
         save: {
           icon:  '<i class="fa-solid fa-check"></i>',
           label: "Save",
           callback: (html) => {
-            const el             = html[0] ?? html;
-            const tList          = [...el.querySelectorAll("#dlg-tag-list .cm-tag-chip")].map(c => c.dataset.tag).filter(Boolean);
-            const overrideChecked = isMapLevel ? true : (el.querySelector("#dlg-enc-override")?.checked ?? false);
-            let encounter;
-            if (isMapLevel || overrideChecked) {
-              encounter = {
-                ...(!isMapLevel && { override: true }),
-                uuid:      el.querySelector("#dlg-enc-uuid")?.value.trim()       ?? "",
-                frequency: el.querySelector("#dlg-enc-freq")?.value              ?? "daily",
-                die:       el.querySelector("#dlg-enc-die")?.value.trim()        ?? "",
-                threshold: el.querySelector("#dlg-enc-threshold")?.value.trim()  ?? "",
-              };
-            } else {
-              encounter = {};
-            }
-            const result = { data: { tags: tList, encounter } };
+            const el = html[0] ?? html;
+            const tList = [...el.querySelectorAll("#dlg-tag-list .cm-tag-chip")]
+              .map(c => c.dataset.tag).filter(Boolean);
+            const overrideChecked = isMapLevel
+              ? true : (el.querySelector("#dlg-enc-override")?.checked ?? false);
+            const encounters = [...el.querySelectorAll("#dlg-enc-list .cm-enc-row")]
+              .map(row => _readRowData(row))
+              .filter(enc => {
+                // Drop primary rows if override is off at non-map levels
+                if (!isMapLevel && !overrideChecked && enc.type === "primary") return false;
+                if (enc.type === "subtable") return !!(enc.uuid && enc.keyword);
+                return !!(enc.uuid || enc.die);
+              })
+              .map(enc => {
+                if (!isMapLevel && enc.type === "primary") return { ...enc, override: true };
+                return enc;
+              });
+            const result = { data: { tags: tList, encounters } };
             if (isMapLevel) {
               result.data.hoursPerDay = parseInt(el.querySelector("#dlg-hours-per-day")?.value) || 24;
-              const chv = parseInt(el.querySelector("#dlg-daily-check-hour")?.value);
-              result.data.dailyCheckHour = isNaN(chv) ? 6 : chv;
             }
             if (hasName) {
               result.name  = el.querySelector("#dlg-cfg-name")?.value.trim() || name;
@@ -647,26 +666,25 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
 
         const chainEl    = el.querySelector("#dlg-chain-display");
         const overrideCb = el.querySelector("#dlg-enc-override");
+        const listEl     = el.querySelector("#dlg-enc-list");
+        const addBtn     = el.querySelector("#dlg-enc-add");
+        const ipEl       = el.querySelector("#dlg-inherited-primary");
 
-        // Build chain node list for display
-        // Nodes: Map (always) + intermediate parents with override=true + current if overrideChecked
-        // State: "current" if it's the level being edited; "active" if last & not current; "past" otherwise
+        // ── Chain display ────────────────────────────────────────────────────
         function buildChainNodes(isOverrideChecked) {
           if (isMapLevel) return [];
           const nodes = [{ label: "Map", phantom: false }];
           for (let pi = 1; pi < parentChain.length; pi++) {
             const p = parentChain[pi];
-            if (p.phantom) {
-              nodes.push({ label: p.label, phantom: true });
-              continue;
-            }
-            const pEnc = p.config?.encounter;
-            if (pEnc?.override === true && !!(pEnc.uuid || pEnc.die || pEnc.threshold)) {
-              nodes.push({ label: p.label, phantom: false });
-            }
+            if (p.phantom) { nodes.push({ label: p.label, phantom: true }); continue; }
+            const isMap = p.label === "Map";
+            const hasPrimary = _localGetEncounters(p.config).some(enc => {
+              if (enc.type !== "primary") return false;
+              return isMap ? !!(enc.uuid || enc.die) : enc.override === true && !!(enc.uuid || enc.die);
+            });
+            if (hasPrimary) nodes.push({ label: p.label, phantom: false });
           }
           if (isOverrideChecked) nodes.push({ label: currentLabel, phantom: false });
-          // Determine state: phantom nodes are "phantom"; of the real nodes, last is "active" (or "current")
           const realNodes = nodes.filter(n => !n.phantom);
           const lastReal  = realNodes[realNodes.length - 1];
           return nodes.map(n => {
@@ -685,27 +703,118 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
           ).join("");
         }
 
-        function setEncFields(isOverrideChecked) {
-          const enc      = isOverrideChecked ? thisEnc : (inheritedEnc ?? {});
-          const disabled = !isOverrideChecked && !isMapLevel;
-          const uuidEl   = el.querySelector("#dlg-enc-uuid");
-          const freqEl   = el.querySelector("#dlg-enc-freq");
-          const dieEl    = el.querySelector("#dlg-enc-die");
-          const thrEl    = el.querySelector("#dlg-enc-threshold");
-          if (uuidEl) { uuidEl.value    = enc.uuid      ?? "";       uuidEl.disabled = disabled; }
-          if (dieEl)  { dieEl.value     = enc.die       ?? "";       dieEl.disabled  = disabled; }
-          if (thrEl)  { thrEl.value     = enc.threshold ?? "";       thrEl.disabled  = disabled; }
-          if (freqEl) { freqEl.value    = enc.frequency ?? "daily";  freqEl.disabled = disabled; }
+        // ── Inherited primary display ────────────────────────────────────────
+        function renderInheritedPrimary() {
+          if (!ipEl) return;
+          if (inheritedPrimary) {
+            const freq = inheritedPrimary.frequency ?? "daily";
+            const det  = [inheritedPrimary.die, inheritedPrimary.threshold].filter(Boolean).join(" / ");
+            ipEl.innerHTML = `<div class="cm-enc-inherited-row">
+              <span class="cm-enc-inherited-label">Primary from <b>${_esc(inheritedPrimary.inheritedFrom)}</b></span>
+              <span class="cm-enc-inherited-detail">${det ? `${_esc(det)} · ` : ""}${freq}</span>
+            </div>`;
+          } else {
+            ipEl.innerHTML = `<div class="cm-enc-inherited-row cm-enc-no-inherit">No inherited primary</div>`;
+          }
+        }
+
+        // ── Encounter row factory ────────────────────────────────────────────
+        function makeRow(enc) {
+          const type = enc.type ?? "secondary";
+          const row  = document.createElement("div");
+          row.className = "cm-enc-row";
+
+          const typeOpts = `
+            <option value="primary"   ${type === "primary"   ? "selected" : ""}>Primary</option>
+            <option value="subtable"  ${type === "subtable"  ? "selected" : ""}>Sub-Table</option>
+            <option value="secondary" ${type === "secondary" ? "selected" : ""}>Secondary</option>`;
+
+          if (type === "subtable") {
+            row.innerHTML = `
+              <select class="cm-enc-type"   title="Entry type">${typeOpts}</select>
+              <input  class="cm-enc-uuid"    type="text" value="${_esc(enc.uuid    ?? "")}" placeholder="Table/Macro UUID" title="Table or Macro UUID (drag to link)">
+              <input  class="cm-enc-keyword" type="text" value="${_esc(enc.keyword ?? "")}" placeholder="Keyword" title="Fires when primary result text contains this keyword">
+              <button class="cm-enc-delete"  type="button" title="Remove">×</button>`;
+          } else {
+            const freq = enc.frequency ?? "daily";
+            row.innerHTML = `
+              <select class="cm-enc-type"   title="Entry type">${typeOpts}</select>
+              <input  class="cm-enc-uuid"      type="text"   value="${_esc(enc.uuid      ?? "")}" placeholder="Table/Macro UUID" title="Table or Macro UUID (drag to link)">
+              <select class="cm-enc-trigger"   title="Trigger — when this encounter fires">
+                <option value="daily"    ${freq === "daily"    ? "selected" : ""}>Daily</option>
+                <option value="entering" ${freq === "entering" ? "selected" : ""}>Enter Hex</option>
+                <option value="leaving"  ${freq === "leaving"  ? "selected" : ""}>Leave Hex</option>
+              </select>
+              <input  class="cm-enc-die"       type="text"   value="${_esc(enc.die       ?? "")}" placeholder="1d6"  title="Encounter Die (e.g. 1d6, 2d6)">
+              <input  class="cm-enc-threshold" type="text"   value="${_esc(enc.threshold ?? "")}" placeholder="1,2"  title="Encounter On — roll values that trigger (e.g. 1,2 or 1-3; blank = always)">
+              <input  class="cm-enc-checkhour" type="number" value="${enc.checkHour ?? 6}" min="0" max="47"          title="Daily Check Hour (0–hoursPerDay−1)">
+              <button class="cm-enc-delete"    type="button" title="Remove">×</button>`;
+
+            const trigEl  = row.querySelector(".cm-enc-trigger");
+            const hourEl  = row.querySelector(".cm-enc-checkhour");
+            hourEl.style.display = freq === "daily" ? "" : "none";
+            trigEl.addEventListener("change", () => {
+              hourEl.style.display = trigEl.value === "daily" ? "" : "none";
+            });
+          }
+
+          // Type change: rebuild row — guard against duplicate primary
+          const typeEl = row.querySelector(".cm-enc-type");
+          typeEl.dataset.prevType = type;
+          typeEl.addEventListener("change", () => {
+            const newType = typeEl.value;
+            if (newType === "primary") {
+              const otherPrimaries = [...(listEl?.querySelectorAll(".cm-enc-row") ?? [])]
+                .filter(r => r !== row && r.querySelector(".cm-enc-type")?.value === "primary");
+              if (otherPrimaries.length > 0) {
+                ui.notifications.error("Only one Primary encounter entry is allowed per level.");
+                typeEl.value = typeEl.dataset.prevType;
+                return;
+              }
+            }
+            typeEl.dataset.prevType = newType;
+            const cur  = _readRowData(row);
+            cur.type   = newType;
+            const newR = makeRow(cur);
+            row.replaceWith(newR);
+          });
+
+          row.querySelector(".cm-enc-delete").addEventListener("click", () => row.remove());
+          return row;
+        }
+
+        // ── Populate initial list ────────────────────────────────────────────
+        function populateList(isOverrideChecked) {
+          if (!listEl) return;
+          listEl.innerHTML = "";
+          for (const enc of thisEncounters) {
+            // Hide primary rows when override is off at non-map levels
+            if (enc.type === "primary" && !isMapLevel && !isOverrideChecked) continue;
+            listEl.appendChild(makeRow(enc));
+          }
         }
 
         renderChain(isOverrideInit);
-        setEncFields(isOverrideInit);
+        renderInheritedPrimary();
+        populateList(isOverrideInit);
 
         overrideCb?.addEventListener("change", (e) => {
           renderChain(e.target.checked);
-          setEncFields(e.target.checked);
+          if (!e.target.checked) {
+            // Remove primary rows when override is turned off
+            listEl?.querySelectorAll(".cm-enc-row").forEach(row => {
+              if (row.querySelector(".cm-enc-type")?.value === "primary") row.remove();
+            });
+          }
         });
 
+        addBtn?.addEventListener("click", () => {
+          const row = makeRow({ type: "secondary", frequency: "entering", die: "1d6", threshold: "", checkHour: 6 });
+          listEl?.appendChild(row);
+          row.querySelector(".cm-enc-uuid")?.focus();
+        });
+
+        // ── Tag events ───────────────────────────────────────────────────────
         el.querySelector("#dlg-tag-add")?.addEventListener("click", () => {
           const inp = el.querySelector("#dlg-tag-input");
           const tag = inp?.value.trim();
@@ -758,7 +867,7 @@ Hooks.on("cm:openHexConfig", async (i, j) => {
   if (result === null) return;
   const all = foundry.utils.deepClone(getHexConfigs());
   const d         = result.data;
-  const hasEnc    = d?.encounter?.override === true && !!(d.encounter?.uuid || d.encounter?.die || d.encounter?.threshold);
+  const hasEnc    = d?.encounters?.length > 0;
   const isEmpty   = !d || ((!d.tags || !d.tags.length) && !d.name && !hasEnc);
   if (isEmpty) delete all[key]; else all[key] = d;
   MM._sentHexConfig = foundry.utils.deepClone(all);
