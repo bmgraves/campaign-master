@@ -3,7 +3,7 @@
    FoundryVTT V13 — Entry point
    ============================================================ */
 
-import { startHighlighter, stopHighlighter }             from "./tools/hex-highlighter.js";
+import { startHexPreview, stopHexPreview }               from "./tools/hex-preview.js";
 import { startTracker, stopTracker }                     from "./tools/token-tracker.js";
 import { toggleMapManagerUI, refreshPanelLists }         from "./tools/map-manager-ui.js";
 import { startEncounterWatcher }                          from "./tools/encounter-manager.js";
@@ -22,7 +22,7 @@ import {
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 Hooks.once("init", () => {
-  game.settings.register(MODULE_ID, "highlighterActive", {
+  game.settings.register(MODULE_ID, "hexPreviewActive", {
     scope: "client", config: false, type: Boolean, default: false,
   });
   game.settings.register(MODULE_ID, "trackerActive", {
@@ -45,19 +45,22 @@ Hooks.on("getSceneControlButtons", (controls) => {
     icon:        "fa-solid fa-hexagon",
     order:       99,
     visible:     true,
-    activeTool:  "hex-highlight",
+    activeTool:  "map-manager",
     tools: {
-      "hex-highlight": {
-        name:    "hex-highlight",
-        title:   "Hex Highlighter",
-        icon:    "fa-solid fa-highlighter",
+      "hex-preview": {
+        name:    "hex-preview",
+        title:   "Hex Preview",
+        icon:    "fa-solid fa-magnifying-glass",
         order:   1,
         toggle:  true,
-        active:  game.settings.get(MODULE_ID, "highlighterActive"),
+        active:  game.settings.get(MODULE_ID, "hexPreviewActive"),
         visible: true,
         onChange: (event, active) => {
-          game.settings.set(MODULE_ID, "highlighterActive", active);
-          if (active) startHighlighter(); else stopHighlighter();
+          // Guard: only act when the state actually changes, preventing Foundry
+          // from auto-starting the preview when the control group tab is opened.
+          if (!!active === game.settings.get(MODULE_ID, "hexPreviewActive")) return;
+          game.settings.set(MODULE_ID, "hexPreviewActive", active);
+          if (active) startHexPreview(); else stopHexPreview();
         },
       },
       "token-tracker": {
@@ -90,7 +93,7 @@ Hooks.on("getSceneControlButtons", (controls) => {
 
 Hooks.once("ready", () => {
   console.log("Campaign Master | Ready.");
-  if (game.settings.get(MODULE_ID, "highlighterActive")) startHighlighter();
+  if (game.settings.get(MODULE_ID, "hexPreviewActive")) startHexPreview();
   if (game.settings.get(MODULE_ID, "trackerActive"))     startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedConfig });
   startEncounterWatcher({ getResolvedConfig, getMapConfig });
 });
