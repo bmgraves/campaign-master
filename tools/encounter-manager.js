@@ -39,31 +39,39 @@ function _crossedCheckTime(prevTime, worldTime, secsPerDay, checkOffset) {
 }
 
 // ── Core roll ─────────────────────────────────────────────────────────────────
-// enc: { uuid, die, threshold, frequency, checkHour, inheritedFrom }
+// enc: { uuid, die?, threshold?, frequency, checkHour, inheritedFrom }
 // ctx: { tokenName, locationLabel }
 // subtables: [{ uuid, keyword, inheritedFrom }] — checked against draw results
 //
-// Returns the joined result text from any RollTable draw (for subtable matching).
+// If enc.die is empty the table draws automatically (100% chance).
 
 export async function rollEncounterCheck(enc, { tokenName, locationLabel }, subtables = []) {
-  if (!enc?.uuid || !enc?.die) return;
+  if (!enc?.uuid) return;
 
-  let roll;
-  try {
-    roll = await new Roll(enc.die).evaluate();
-  } catch (e) {
-    console.warn("Campaign Master | Bad encounter die formula:", enc.die, e);
-    return;
-  }
-
-  const threshold = _parseThreshold(enc.threshold);
-  const triggered = !threshold.length || threshold.includes(roll.total);
-  const thrLabel  = threshold.length ? enc.threshold : "any";
-  const doc       = fromUuidSync(enc.uuid);
+  // Use async fromUuid — fromUuidSync can miss compendium/embedded documents
+  const doc       = await fromUuid(enc.uuid);
   const tableName = doc?.name ?? enc.uuid;
   const typeLabel = enc.type === "secondary" ? "Secondary" : "Primary";
   const viaLabel  = enc.inheritedFrom
     ? `<span style="color:#555;font-size:10px;"> via ${enc.inheritedFrom}</span>` : "";
+
+  // ── Roll check (optional) ─────────────────────────────────────────────────
+  const hasDie = !!(enc.die?.trim());
+  let roll      = null;
+  let triggered = true;
+  let thrLabel  = "auto";
+
+  if (hasDie) {
+    try {
+      roll = await new Roll(enc.die).evaluate();
+    } catch (e) {
+      console.warn("Campaign Master | Bad encounter die formula:", enc.die, e);
+      return;
+    }
+    const threshold = _parseThreshold(enc.threshold);
+    triggered = !threshold.length || threshold.includes(roll.total);
+    thrLabel  = threshold.length ? enc.threshold : "any";
+  }
 
   if (!triggered) {
     ChatMessage.create({
@@ -84,54 +92,90 @@ export async function rollEncounterCheck(enc, { tokenName, locationLabel }, subt
     return;
   }
 
-  // Triggered — announce then draw from table
+  // ── Announce trigger ──────────────────────────────────────────────────────
+  const rollLine = roll
+    ? `<b style="color:#e8c040;">${roll.total}</b> on <code>${enc.die}</code> — threshold: ${thrLabel} — <b style="color:#e8c040;">triggered!</b>`
+    : `<span style="color:#e8c040;">automatic</span>`;
+
   ChatMessage.create({
     content: `
       <div style="border:1px solid #c0a020;border-radius:6px;padding:6px 10px;
           background:#1a1500;font-size:12px;line-height:1.7;color:#aaa;">
         <b style="color:#e8c040;">⚔️ Encounter!</b>
         <div><span style="color:#666;">Token:</span> ${tokenName} → <b>${locationLabel}</b></div>
-        <div><span style="color:#666;">Rolled:</span>
-          <b style="color:#e8c040;">${roll.total}</b> on <code>${enc.die}</code>
-          — threshold: ${thrLabel} — <b style="color:#e8c040;">triggered!</b>
-        </div>
+        <div><span style="color:#666;">Rolled:</span> ${rollLine}</div>
         <div><span style="color:#666;">[${typeLabel}] Table:</span> ${tableName}${viaLabel}</div>
       </div>`,
     speaker: { alias: "Campaign Master" },
     whisper: ChatMessage.getWhisperRecipients("GM"),
   });
 
+  // ── Draw from table / execute macro ───────────────────────────────────────
+  // Use roll({ displayChat: false }) to get results without auto-posting to chat,
+  // then extract text (getChatText is async in V13), then post manually via toMessage.
   let resultText = "";
   if (doc?.documentName === "RollTable") {
-    const draw = await doc.draw({ rollMode: "gmroll" });
-    resultText = (draw?.results ?? []).map(r => r.text ?? r.getChatText?.() ?? "").join(" ");
+    const rolled  = await doc.roll({ displayChat: false });
+    const results = rolled?.results ?? [];
+
+    const textParts = [];
+    for (const r of results) {
+      // Include both the rich-text body AND the Result Name field so keywords
+      // can match against either without requiring the text body to be filled in.
+      let body = "";
+      if (typeof r.getChatText === "function") {
+        const html = await r.getChatText();
+        body = html ? html.replace(/<[^>]*>/g, "").trim() : "";
+      }
+      if (!body) body = (r.text ?? r.data?.text ?? r._source?.text ?? "").trim();
+      const name = (r.name ?? r.data?.name ?? r._source?.name ?? "").trim();
+      const combined = [body, name].filter(Boolean).join(" ");
+      if (combined) textParts.push(combined);
+    }
+    resultText = textParts.join(" ").trim();
+    console.log(`Campaign Master | Roll resultText="${resultText}" | ${subtables.length} subtable(s)`);
+
+    // Post the table result to chat as a GM-only roll
+    try {
+      await doc.toMessage(results, { roll: rolled.roll, rollMode: "gmroll" });
+    } catch (e) {
+      console.warn("Campaign Master | toMessage failed, falling back to draw:", e);
+      await doc.draw({ rollMode: "gmroll" });
+    }
   } else if (doc?.documentName === "Macro") {
     await doc.execute();
   }
 
-  // Sub-table keyword matching
-  if (resultText && subtables.length > 0) {
-    for (const sub of subtables) {
-      if (!sub.keyword || !sub.uuid) continue;
-      if (!resultText.toLowerCase().includes(sub.keyword.toLowerCase())) continue;
-      const subDoc = fromUuidSync(sub.uuid);
-      if (!subDoc) continue;
-      ChatMessage.create({
-        content: `
-          <div style="border:1px solid #4a5a7a;border-radius:6px;padding:6px 10px;
-              background:#0d1020;font-size:12px;line-height:1.7;color:#aaa;">
-            <b style="color:#7ab0dd;">📋 Sub-Table</b>
-            — keyword <code>${sub.keyword}</code> matched
-            <div><span style="color:#666;">Table:</span> ${subDoc.name}
-              <span style="color:#555;font-size:10px;"> via ${sub.inheritedFrom}</span>
-            </div>
-          </div>`,
-        speaker: { alias: "Campaign Master" },
-        whisper: ChatMessage.getWhisperRecipients("GM"),
-      });
-      if (subDoc.documentName === "RollTable") await subDoc.draw({ rollMode: "gmroll" });
-      else if (subDoc.documentName === "Macro") await subDoc.execute();
+  // ── Sub-table keyword matching ────────────────────────────────────────────
+  for (const sub of subtables) {
+    if (!sub.keyword || !sub.uuid) continue;
+    const matched = resultText.toLowerCase().includes(sub.keyword.toLowerCase());
+    if (!matched) continue;
+
+    // Resolve sub-table document (async for compendium support)
+    const subDoc  = await fromUuid(sub.uuid);
+    const subName = subDoc?.name ?? sub.uuid;
+    const subVia  = `<span style="color:#555;font-size:10px;"> via ${sub.inheritedFrom}</span>`;
+
+    // Announce keyword match — always visible even if UUID was bad
+    ChatMessage.create({
+      content: `
+        <div style="border:1px solid #4a5a7a;border-radius:6px;padding:6px 10px;
+            background:#0d1020;font-size:12px;line-height:1.7;color:#aaa;">
+          <b style="color:#7ab0dd;">📋 Sub-Table</b>
+          — keyword <code>${sub.keyword}</code> matched
+          <div><span style="color:#666;">Table:</span> ${subName}${subVia}</div>
+        </div>`,
+      speaker: { alias: "Campaign Master" },
+      whisper: ChatMessage.getWhisperRecipients("GM"),
+    });
+
+    if (!subDoc) {
+      console.warn(`Campaign Master | Sub-table UUID not found: "${sub.uuid}"`);
+      continue;
     }
+    if (subDoc.documentName === "RollTable") await subDoc.draw({ rollMode: "gmroll" });
+    else if (subDoc.documentName === "Macro") await subDoc.execute();
   }
 }
 

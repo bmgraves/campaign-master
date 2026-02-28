@@ -615,6 +615,7 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
     const dlg = new Dialog({
       title,
       content,
+      width: 560,
       buttons: {
         save: {
           icon:  '<i class="fa-solid fa-check"></i>',
@@ -730,23 +731,23 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
 
           if (type === "subtable") {
             row.innerHTML = `
-              <select class="cm-enc-type">${typeOpts}</select>
-              <input  class="cm-enc-uuid"    type="text" value="${_esc(enc.uuid    ?? "")}" placeholder="Table/Macro UUID">
-              <input  class="cm-enc-keyword" type="text" value="${_esc(enc.keyword ?? "")}" placeholder="Keyword">
+              <select class="cm-enc-type"   title="Entry type">${typeOpts}</select>
+              <input  class="cm-enc-uuid"    type="text" value="${_esc(enc.uuid    ?? "")}" placeholder="Table/Macro UUID" title="Table or Macro UUID (drag to link)">
+              <input  class="cm-enc-keyword" type="text" value="${_esc(enc.keyword ?? "")}" placeholder="Keyword" title="Fires when primary result text contains this keyword">
               <button class="cm-enc-delete"  type="button" title="Remove">×</button>`;
           } else {
             const freq = enc.frequency ?? "daily";
             row.innerHTML = `
-              <select class="cm-enc-type">${typeOpts}</select>
-              <input  class="cm-enc-uuid"      type="text"   value="${_esc(enc.uuid      ?? "")}" placeholder="Table/Macro UUID">
-              <select class="cm-enc-trigger">
+              <select class="cm-enc-type"   title="Entry type">${typeOpts}</select>
+              <input  class="cm-enc-uuid"      type="text"   value="${_esc(enc.uuid      ?? "")}" placeholder="Table/Macro UUID" title="Table or Macro UUID (drag to link)">
+              <select class="cm-enc-trigger"   title="Trigger — when this encounter fires">
                 <option value="daily"    ${freq === "daily"    ? "selected" : ""}>Daily</option>
                 <option value="entering" ${freq === "entering" ? "selected" : ""}>Enter Hex</option>
                 <option value="leaving"  ${freq === "leaving"  ? "selected" : ""}>Leave Hex</option>
               </select>
-              <input  class="cm-enc-die"       type="text"   value="${_esc(enc.die       ?? "")}" placeholder="1d6">
-              <input  class="cm-enc-threshold" type="text"   value="${_esc(enc.threshold ?? "")}" placeholder="1,2">
-              <input  class="cm-enc-checkhour" type="number" value="${enc.checkHour ?? 6}" min="0" max="47" title="Check hour (daily only)">
+              <input  class="cm-enc-die"       type="text"   value="${_esc(enc.die       ?? "")}" placeholder="1d6"  title="Encounter Die (e.g. 1d6, 2d6)">
+              <input  class="cm-enc-threshold" type="text"   value="${_esc(enc.threshold ?? "")}" placeholder="1,2"  title="Encounter On — roll values that trigger (e.g. 1,2 or 1-3; blank = always)">
+              <input  class="cm-enc-checkhour" type="number" value="${enc.checkHour ?? 6}" min="0" max="47"          title="Daily Check Hour (0–hoursPerDay−1)">
               <button class="cm-enc-delete"    type="button" title="Remove">×</button>`;
 
             const trigEl  = row.querySelector(".cm-enc-trigger");
@@ -757,11 +758,23 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
             });
           }
 
-          // Type change: rebuild the row preserving values
+          // Type change: rebuild row — guard against duplicate primary
           const typeEl = row.querySelector(".cm-enc-type");
+          typeEl.dataset.prevType = type;
           typeEl.addEventListener("change", () => {
+            const newType = typeEl.value;
+            if (newType === "primary") {
+              const otherPrimaries = [...(listEl?.querySelectorAll(".cm-enc-row") ?? [])]
+                .filter(r => r !== row && r.querySelector(".cm-enc-type")?.value === "primary");
+              if (otherPrimaries.length > 0) {
+                ui.notifications.error("Only one Primary encounter entry is allowed per level.");
+                typeEl.value = typeEl.dataset.prevType;
+                return;
+              }
+            }
+            typeEl.dataset.prevType = newType;
             const cur  = _readRowData(row);
-            cur.type   = typeEl.value;
+            cur.type   = newType;
             const newR = makeRow(cur);
             row.replaceWith(newR);
           });

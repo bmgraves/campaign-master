@@ -643,7 +643,7 @@
   border: 1px solid #2e2e2e;
   border-radius: 4px;
   padding: 4px 5px;
-  flex-wrap: wrap;
+  overflow: hidden;
 }
 
 .cm-enc-row select,
@@ -662,13 +662,13 @@
 .cm-enc-row select:focus,
 .cm-enc-row input:focus { outline: none; border-color: #4a7c4e; }
 
-.cm-enc-type      { width: 82px;  flex-shrink: 0; }
-.cm-enc-uuid      { flex: 1; min-width: 80px; }
-.cm-enc-trigger   { width: 82px;  flex-shrink: 0; }
-.cm-enc-die       { width: 48px;  flex-shrink: 0; }
-.cm-enc-threshold { width: 48px;  flex-shrink: 0; }
-.cm-enc-checkhour { width: 40px;  flex-shrink: 0; }
-.cm-enc-keyword   { width: 90px;  flex-shrink: 0; }
+.cm-enc-type      { width: 78px;  flex-shrink: 0; }
+.cm-enc-uuid      { flex: 1; min-width: 60px; }
+.cm-enc-trigger   { width: 76px;  flex-shrink: 0; }
+.cm-enc-die       { width: 44px;  flex-shrink: 0; }
+.cm-enc-threshold { width: 44px;  flex-shrink: 0; }
+.cm-enc-checkhour { width: 38px;  flex-shrink: 0; }
+.cm-enc-keyword   { width: 86px;  flex-shrink: 0; }
 
 .cm-enc-delete {
   background: none;
