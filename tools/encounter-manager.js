@@ -1,7 +1,7 @@
 /* ============================================================
    Campaign Master — Encounter Manager
    Handles encounter rolls triggered by:
-     - Daily check   (updateWorldTime crosses the configured hour)
+     - Daily check   (updateWorldTime crosses the configured check hour per entry)
      - Entering hex  (updateToken with position change)
      - Leaving hex   (preUpdateToken with position change)
    Only fires for the GM client.
@@ -10,9 +10,9 @@
 const CM_EM = { watcher: null };
 
 // ── Threshold parser ──────────────────────────────────────────────────────────
-// "" / null  → [] (always trigger)
-// "1,2"      → [1, 2]
-// "1-3"      → [1, 2, 3]
+// ""  / null  → [] (always trigger)
+// "1,2"       → [1, 2]
+// "1-3"       → [1, 2, 3]
 
 function _parseThreshold(str) {
   if (!str?.trim()) return [];
@@ -26,11 +26,26 @@ function _parseThreshold(str) {
   return s.split(",").map(p => parseInt(p.trim())).filter(n => !isNaN(n));
 }
 
-// ── Core roll ─────────────────────────────────────────────────────────────────
-// enc: { uuid, die, threshold, frequency, inheritedFrom }
-// ctx: { tokenName, locationLabel }
+// ── Daily check-time crossing detector ───────────────────────────────────────
 
-export async function rollEncounterCheck(enc, { tokenName, locationLabel }) {
+function _crossedCheckTime(prevTime, worldTime, secsPerDay, checkOffset) {
+  const dayStart = Math.floor(prevTime  / secsPerDay);
+  const dayEnd   = Math.floor(worldTime / secsPerDay);
+  for (let d = dayStart; d <= dayEnd; d++) {
+    const t = d * secsPerDay + checkOffset;
+    if (t > prevTime && t <= worldTime) return true;
+  }
+  return false;
+}
+
+// ── Core roll ─────────────────────────────────────────────────────────────────
+// enc: { uuid, die, threshold, frequency, checkHour, inheritedFrom }
+// ctx: { tokenName, locationLabel }
+// subtables: [{ uuid, keyword, inheritedFrom }] — checked against draw results
+//
+// Returns the joined result text from any RollTable draw (for subtable matching).
+
+export async function rollEncounterCheck(enc, { tokenName, locationLabel }, subtables = []) {
   if (!enc?.uuid || !enc?.die) return;
 
   let roll;
@@ -46,6 +61,7 @@ export async function rollEncounterCheck(enc, { tokenName, locationLabel }) {
   const thrLabel  = threshold.length ? enc.threshold : "any";
   const doc       = fromUuidSync(enc.uuid);
   const tableName = doc?.name ?? enc.uuid;
+  const typeLabel = enc.type === "secondary" ? "Secondary" : "Primary";
   const viaLabel  = enc.inheritedFrom
     ? `<span style="color:#555;font-size:10px;"> via ${enc.inheritedFrom}</span>` : "";
 
@@ -60,7 +76,7 @@ export async function rollEncounterCheck(enc, { tokenName, locationLabel }) {
             <b style="color:#ccc;">${roll.total}</b> on <code>${enc.die}</code>
             — threshold: ${thrLabel} — <i>no trigger</i>
           </div>
-          <div><span style="color:#666;">Table:</span> ${tableName}${viaLabel}</div>
+          <div><span style="color:#666;">[${typeLabel}] Table:</span> ${tableName}${viaLabel}</div>
         </div>`,
       speaker: { alias: "Campaign Master" },
       whisper: ChatMessage.getWhisperRecipients("GM"),
@@ -79,16 +95,43 @@ export async function rollEncounterCheck(enc, { tokenName, locationLabel }) {
           <b style="color:#e8c040;">${roll.total}</b> on <code>${enc.die}</code>
           — threshold: ${thrLabel} — <b style="color:#e8c040;">triggered!</b>
         </div>
-        <div><span style="color:#666;">Table:</span> ${tableName}${viaLabel}</div>
+        <div><span style="color:#666;">[${typeLabel}] Table:</span> ${tableName}${viaLabel}</div>
       </div>`,
     speaker: { alias: "Campaign Master" },
     whisper: ChatMessage.getWhisperRecipients("GM"),
   });
 
+  let resultText = "";
   if (doc?.documentName === "RollTable") {
-    await doc.draw({ rollMode: "gmroll" });
+    const draw = await doc.draw({ rollMode: "gmroll" });
+    resultText = (draw?.results ?? []).map(r => r.text ?? r.getChatText?.() ?? "").join(" ");
   } else if (doc?.documentName === "Macro") {
     await doc.execute();
+  }
+
+  // Sub-table keyword matching
+  if (resultText && subtables.length > 0) {
+    for (const sub of subtables) {
+      if (!sub.keyword || !sub.uuid) continue;
+      if (!resultText.toLowerCase().includes(sub.keyword.toLowerCase())) continue;
+      const subDoc = fromUuidSync(sub.uuid);
+      if (!subDoc) continue;
+      ChatMessage.create({
+        content: `
+          <div style="border:1px solid #4a5a7a;border-radius:6px;padding:6px 10px;
+              background:#0d1020;font-size:12px;line-height:1.7;color:#aaa;">
+            <b style="color:#7ab0dd;">📋 Sub-Table</b>
+            — keyword <code>${sub.keyword}</code> matched
+            <div><span style="color:#666;">Table:</span> ${subDoc.name}
+              <span style="color:#555;font-size:10px;"> via ${sub.inheritedFrom}</span>
+            </div>
+          </div>`,
+        speaker: { alias: "Campaign Master" },
+        whisper: ChatMessage.getWhisperRecipients("GM"),
+      });
+      if (subDoc.documentName === "RollTable") await subDoc.draw({ rollMode: "gmroll" });
+      else if (subDoc.documentName === "Macro") await subDoc.execute();
+    }
   }
 }
 
@@ -107,7 +150,7 @@ export function startEncounterWatcher({ getResolvedConfig, getMapConfig }) {
   if (CM_EM.watcher) return;
 
   // ── Daily ──────────────────────────────────────────────────────────────────
-  // Fires when world time crosses the configured check hour on any day.
+  // Fires when world time crosses the per-entry check hour on any day.
 
   const hookTime = Hooks.on("updateWorldTime", async (worldTime, delta) => {
     if (!game.user.isGM) return;
@@ -115,32 +158,35 @@ export function startEncounterWatcher({ getResolvedConfig, getMapConfig }) {
     if (delta <= 0)      return;
 
     const mapCfg      = getMapConfig() ?? {};
-    const hoursPerDay = mapCfg.hoursPerDay    ?? 24;
-    const checkHour   = mapCfg.dailyCheckHour ?? 6;
+    const hoursPerDay = mapCfg.hoursPerDay ?? 24;
     const secsPerDay  = hoursPerDay * 3600;
-    const checkOffset = checkHour   * 3600;
     const prevTime    = worldTime - delta;
-
-    // Was any "check boundary" crossed?
-    let triggered = false;
-    const dayStart = Math.floor(prevTime    / secsPerDay);
-    const dayEnd   = Math.floor(worldTime   / secsPerDay);
-    for (let d = dayStart; d <= dayEnd; d++) {
-      const t = d * secsPerDay + checkOffset;
-      if (t > prevTime && t <= worldTime) { triggered = true; break; }
-    }
-    if (!triggered) return;
 
     const tokens = canvas.tokens?.placeables ?? [];
     for (const token of tokens) {
       const c   = _tokenCenter(token.document, token.x, token.y);
       const off = canvas.grid.getOffset(c);
       const resolved = getResolvedConfig(off.i, off.j);
-      if (resolved?.encounter?.frequency === "daily") {
-        await rollEncounterCheck(resolved.encounter, {
-          tokenName:     token.name,
-          locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
-        });
+      const ctx = {
+        tokenName:     token.name,
+        locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
+      };
+
+      // Primary — daily
+      if (resolved.primary?.frequency === "daily") {
+        const checkOffset = (resolved.primary.checkHour ?? 6) * 3600;
+        if (_crossedCheckTime(prevTime, worldTime, secsPerDay, checkOffset)) {
+          await rollEncounterCheck(resolved.primary, ctx, resolved.subtables ?? []);
+        }
+      }
+
+      // Secondaries — daily
+      for (const enc of resolved.secondaries ?? []) {
+        if (enc.frequency !== "daily") continue;
+        const checkOffset = (enc.checkHour ?? 6) * 3600;
+        if (_crossedCheckTime(prevTime, worldTime, secsPerDay, checkOffset)) {
+          await rollEncounterCheck(enc, ctx, resolved.subtables ?? []);
+        }
       }
     }
   });
@@ -154,11 +200,18 @@ export function startEncounterWatcher({ getResolvedConfig, getMapConfig }) {
     const c   = _tokenCenter(tokenDoc, changes.x ?? tokenDoc.x, changes.y ?? tokenDoc.y);
     const off = canvas.grid.getOffset(c);
     const resolved = getResolvedConfig(off.i, off.j);
-    if (resolved?.encounter?.frequency === "entering") {
-      await rollEncounterCheck(resolved.encounter, {
-        tokenName:     tokenDoc.name,
-        locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
-      });
+    const ctx = {
+      tokenName:     tokenDoc.name,
+      locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
+    };
+
+    if (resolved.primary?.frequency === "entering") {
+      await rollEncounterCheck(resolved.primary, ctx, resolved.subtables ?? []);
+    }
+    for (const enc of resolved.secondaries ?? []) {
+      if (enc.frequency === "entering") {
+        await rollEncounterCheck(enc, ctx, resolved.subtables ?? []);
+      }
     }
   });
 
@@ -171,11 +224,18 @@ export function startEncounterWatcher({ getResolvedConfig, getMapConfig }) {
     const c   = _tokenCenter(tokenDoc, tokenDoc.x, tokenDoc.y);
     const off = canvas.grid.getOffset(c);
     const resolved = getResolvedConfig(off.i, off.j);
-    if (resolved?.encounter?.frequency === "leaving") {
-      rollEncounterCheck(resolved.encounter, {
-        tokenName:     tokenDoc.name,
-        locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
-      });
+    const ctx = {
+      tokenName:     tokenDoc.name,
+      locationLabel: resolved.hexName || `[${off.i},${off.j}]`,
+    };
+
+    if (resolved.primary?.frequency === "leaving") {
+      rollEncounterCheck(resolved.primary, ctx, resolved.subtables ?? []);
+    }
+    for (const enc of resolved.secondaries ?? []) {
+      if (enc.frequency === "leaving") {
+        rollEncounterCheck(enc, ctx, resolved.subtables ?? []);
+      }
     }
   });
 
