@@ -49,12 +49,21 @@ export function startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedC
       ? `<div><span style="color:#777;">Tags:</span> ${tags.map(t => `<span style="background:#1a2a3a;border:1px solid #3a5a7a;border-radius:10px;padding:1px 7px;font-size:11px;color:#7ab0dd;">${t}</span>`).join(" ")}</div>`
       : "";
 
+    const enc = resolved?.encounter ?? null;
+    let encLine = "";
+    if (enc?.uuid) {
+      const doc      = fromUuidSync(enc.uuid);
+      const docName  = doc?.name ?? enc.uuid;
+      const details  = [enc.die, enc.threshold].filter(Boolean).join(" / ");
+      encLine = `<div><span style="color:#777;">Enc Table:</span> <b>${docName}</b>${details ? ` <span style="color:#777;font-size:11px;">(${details})</span>` : ""} <span style="color:#555;font-size:11px;">via ${enc.inheritedFrom}</span></div>`;
+    }
+
     ChatMessage.create({
       content: `<div style="border:1px solid #4a7c4e;border-radius:6px;padding:8px 12px;
                   background:#f4f9f4;font-family:sans-serif;font-size:13px;line-height:1.9;">
         <b>🗺️ ${name} moved</b>
         <div><span style="color:#777;">Hex:</span> ${hexLabel}</div>
-        ${regionLine}${terrainLine}${tagsLine}
+        ${regionLine}${terrainLine}${tagsLine}${encLine}
         <div style="border-top:1px solid #ddd;margin-top:4px;padding-top:4px;">
           <span style="color:#777;">Total:</span> <b>${totalSpaces} space${totalSpaces!==1?"s":""}</b>
         </div>

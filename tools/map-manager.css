@@ -441,6 +441,7 @@
 }
 
 .cm-config-row input[type="text"],
+.cm-config-row input[type="number"],
 .cm-config-row select {
   background: #0f0f0f;
   border: 1px solid #444;
@@ -452,6 +453,7 @@
 }
 
 .cm-config-row input[type="text"]:focus,
+.cm-config-row input[type="number"]:focus,
 .cm-config-row select:focus { outline: none; border-color: #4a7c4e; }
 
 .cm-config-override {
@@ -503,10 +505,25 @@
   background: #1a2a3a;
 }
 
+.cm-chain-phantom {
+  border-color: #2a2a2a;
+  border-style: dashed;
+  color: #3a3a3a;
+  background: #0d0d0d;
+  font-style: italic;
+}
+
 .cm-chain-arrow {
   color: #444;
   font-size: 12px;
   line-height: 1;
+}
+
+.cm-chain-note {
+  font-size: 10px;
+  color: #484848;
+  font-style: italic;
+  padding: 0 0 4px;
 }
 
 /* ── Disabled encounter fields ── */

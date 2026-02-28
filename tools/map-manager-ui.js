@@ -462,7 +462,10 @@ async function _editRegion(id, panel) {
   const region  = getRegions()[id];
   if (!region) return;
   const mapCfg  = getMapConfig() ?? {};
-  const parents = [{ label: "Map", config: mapCfg }];
+  const parents = [
+    { label: "Map",     config: mapCfg },
+    { label: "Terrain", config: null,   phantom: true },
+  ];
   const result  = await _showConfigDialog(`Edit Region: ${region.name}`, region.name, region.color, region.data ?? {}, parents, "Region");
   if (!result) return;
   const updated = foundry.utils.deepClone(getRegions());
@@ -544,6 +547,17 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
       <label for="dlg-enc-override">Override encounter</label>
     </div>` : "";
 
+  const hoursPerDayRow = isMapLevel ? `
+    <div class="cm-config-row"><label>Hours per Day</label>
+      <input id="dlg-hours-per-day" type="number" min="1" max="48" step="1"
+        value="${data.hoursPerDay ?? 24}">
+    </div>
+    <div class="cm-config-row"><label>Daily Check Hour</label>
+      <input id="dlg-daily-check-hour" type="number" min="0" max="47" step="1"
+        value="${data.dailyCheckHour ?? 6}"
+        title="Hour of day (0–hoursPerDay−1) when daily encounter checks fire">
+    </div>` : "";
+
   // Encounter fields — values and disabled state set dynamically in render callback
   const encFields = `
     <div id="dlg-enc-fields">
@@ -571,7 +585,9 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
     ${tagsSection}
     <div class="cm-config-section-title">Encounter Manager</div>
     <div class="cm-encounter-section">
+      ${hoursPerDayRow}
       <div id="dlg-chain-display" class="cm-chain-display"></div>
+      ${parentChain.some(p => p.phantom) ? `<div class="cm-chain-note">Terrain inheritance uncertain in configuration</div>` : ""}
       ${overrideRow}
       ${encFields}
     </div>
@@ -602,6 +618,11 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
               encounter = {};
             }
             const result = { data: { tags: tList, encounter } };
+            if (isMapLevel) {
+              result.data.hoursPerDay = parseInt(el.querySelector("#dlg-hours-per-day")?.value) || 24;
+              const chv = parseInt(el.querySelector("#dlg-daily-check-hour")?.value);
+              result.data.dailyCheckHour = isNaN(chv) ? 6 : chv;
+            }
             if (hasName) {
               result.name  = el.querySelector("#dlg-cfg-name")?.value.trim() || name;
               result.color = el.querySelector("#dlg-cfg-color")?.value ?? color;
@@ -632,18 +653,26 @@ function _showConfigDialog(title, name, color, data = {}, parentChain = [], curr
         // State: "current" if it's the level being edited; "active" if last & not current; "past" otherwise
         function buildChainNodes(isOverrideChecked) {
           if (isMapLevel) return [];
-          const nodes = [{ label: "Map" }];
+          const nodes = [{ label: "Map", phantom: false }];
           for (let pi = 1; pi < parentChain.length; pi++) {
-            const p    = parentChain[pi];
+            const p = parentChain[pi];
+            if (p.phantom) {
+              nodes.push({ label: p.label, phantom: true });
+              continue;
+            }
             const pEnc = p.config?.encounter;
             if (pEnc?.override === true && !!(pEnc.uuid || pEnc.die || pEnc.threshold)) {
-              nodes.push({ label: p.label });
+              nodes.push({ label: p.label, phantom: false });
             }
           }
-          if (isOverrideChecked) nodes.push({ label: currentLabel });
-          return nodes.map((n, idx) => {
-            const isLast    = idx === nodes.length - 1;
+          if (isOverrideChecked) nodes.push({ label: currentLabel, phantom: false });
+          // Determine state: phantom nodes are "phantom"; of the real nodes, last is "active" (or "current")
+          const realNodes = nodes.filter(n => !n.phantom);
+          const lastReal  = realNodes[realNodes.length - 1];
+          return nodes.map(n => {
+            if (n.phantom) return { label: n.label + "?", state: "phantom" };
             const isCurrent = n.label === currentLabel;
+            const isLast    = n.label === lastReal?.label;
             return { label: n.label, state: isCurrent ? "current" : (isLast ? "active" : "past") };
           });
         }

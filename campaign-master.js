@@ -3,9 +3,10 @@
    FoundryVTT V13 — Entry point
    ============================================================ */
 
-import { startHighlighter, stopHighlighter }        from "./tools/hex-highlighter.js";
-import { startTracker, stopTracker }                 from "./tools/token-tracker.js";
-import { toggleMapManagerUI, refreshPanelLists }     from "./tools/map-manager-ui.js";
+import { startHighlighter, stopHighlighter }             from "./tools/hex-highlighter.js";
+import { startTracker, stopTracker }                     from "./tools/token-tracker.js";
+import { toggleMapManagerUI, refreshPanelLists }         from "./tools/map-manager-ui.js";
+import { startEncounterWatcher }                          from "./tools/encounter-manager.js";
 import {
   MODULE_ID,
   MM,
@@ -15,6 +16,7 @@ import {
   getTerrainAtPoint, getTerrainAtOffset,
   getRegionAtPoint, getRegionAtOffset,
   getResolvedConfig,
+  getMapConfig,
 } from "./tools/map-manager.js";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -90,6 +92,7 @@ Hooks.once("ready", () => {
   console.log("Campaign Master | Ready.");
   if (game.settings.get(MODULE_ID, "highlighterActive")) startHighlighter();
   if (game.settings.get(MODULE_ID, "trackerActive"))     startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedConfig });
+  startEncounterWatcher({ getResolvedConfig, getMapConfig });
 });
 
 // ── Canvas hooks ──────────────────────────────────────────────────────────────
