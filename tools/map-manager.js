@@ -8,9 +8,10 @@ export const MODULE_ID = "campaign-master";
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 export const MM = {
-  terrainGfx:  null,   // PIXI.Graphics — terrain hex fills
-  regionGfx:   null,   // PIXI.Graphics — region border outlines
-  cursorGfx:   null,   // PIXI.Graphics — brush preview
+  terrainGfx:    null,   // PIXI.Graphics — terrain hex fills
+  regionGfx:     null,   // PIXI.Graphics — region border outlines
+  cursorGfx:     null,   // PIXI.Graphics — brush preview
+  hexConfigGfx:  null,   // PIXI.Container — hex config cog symbols
 
   terrainVisible: true,
   regionVisible:  true,
@@ -19,22 +20,27 @@ export const MM = {
   isDragging:  false,
   brushSize:   1,
 
-  hardBorders:        false,  // skip region cells already in a different region
-  hardTerrainBorders: false,  // skip terrain cells already in a different terrain type
+  hardBorders:        false,
+  hardTerrainBorders: false,
 
   activeTerrainId: null,
   activeRegionId:  null,
 
-  erasing:      false,
-  eraseTerrain: true,
-  eraseRegion:  true,
+  erasing:        false,
+  eraseTerrain:   true,
+  eraseRegion:    true,
+  eraseHexConfig: true,
 
-  _isPainting:     false,
-  _pendingTerrain: null,   // accumulating in-flight terrain cells
-  _pendingRegion:  null,   // accumulating in-flight region cells
-  _sentTerrain:    null,   // last snapshot sent to server (baseline for rapid strokes)
-  _sentRegion:     null,   // last snapshot sent to server (baseline for rapid strokes)
-  _paintHandlers:  null,
+  configureMode: false,   // "Configure Hex" mode — clicks open hex config dialog
+
+  _isPainting:       false,
+  _pendingTerrain:   null,
+  _pendingRegion:    null,
+  _pendingHexConfig: null,
+  _sentTerrain:      null,
+  _sentRegion:       null,
+  _sentHexConfig:    null,
+  _paintHandlers:    null,
 };
 
 // ── Flag helpers ──────────────────────────────────────────────────────────────
@@ -75,6 +81,8 @@ export function getTerrainTypes()  { return getSceneFlag("terrainTypes",   {}); 
 export function getRegions()       { return getSceneFlag("regions",        {}); }
 export function getTerrainCells()  { return getSceneFlag("terrainCells",   {}); }
 export function getRegionCells()   { return getSceneFlag("regionCells",    {}); }
+export function getHexConfigs()    { return getSceneFlag("hexConfigs",     {}); }
+export function getMapConfig()     { return getSceneFlag("mapConfig",      {}); }
 export function cellKey(i, j)      { return `${i},${j}`; }
 
 // ── Migration: paintedCells → terrainCells ───────────────────────────────────
@@ -131,6 +139,10 @@ export function initMapGfx() {
     MM.regionGfx = new PIXI.Graphics();
     layer.addChild(MM.regionGfx);
   }
+  if (!MM.hexConfigGfx) {
+    MM.hexConfigGfx = new PIXI.Container();
+    layer.addChild(MM.hexConfigGfx);
+  }
   if (!MM.cursorGfx) {
     MM.cursorGfx = new PIXI.Graphics();
     layer.addChild(MM.cursorGfx);
@@ -138,9 +150,10 @@ export function initMapGfx() {
 }
 
 export function destroyMapGfx() {
-  if (MM.terrainGfx)  { MM.terrainGfx.destroy();  MM.terrainGfx  = null; }
-  if (MM.regionGfx)   { MM.regionGfx.destroy();   MM.regionGfx   = null; }
-  if (MM.cursorGfx)   { MM.cursorGfx.destroy();   MM.cursorGfx   = null; }
+  if (MM.terrainGfx)   { MM.terrainGfx.destroy();   MM.terrainGfx   = null; }
+  if (MM.regionGfx)    { MM.regionGfx.destroy();    MM.regionGfx    = null; }
+  if (MM.hexConfigGfx) { MM.hexConfigGfx.destroy(); MM.hexConfigGfx = null; }
+  if (MM.cursorGfx)    { MM.cursorGfx.destroy();    MM.cursorGfx    = null; }
 }
 
 // ── Terrain overlay ───────────────────────────────────────────────────────────
@@ -277,6 +290,74 @@ function _drawInsetEdges(gfx, edges, color) {
   }
 }
 
+// ── Hex config cog overlay ────────────────────────────────────────────────────
+
+export function renderHexConfigOverlay(configsOverride = null) {
+  if (!canvas.scene || !MM.hexConfigGfx) return;
+  const configs = configsOverride ?? getHexConfigs();
+  MM.hexConfigGfx.removeChildren();
+
+  const style = new PIXI.TextStyle({
+    fontSize:           12,
+    fill:               0xffffff,
+    fontFamily:         "Arial",
+    dropShadow:         true,
+    dropShadowDistance: 1,
+    dropShadowBlur:     2,
+    dropShadowColor:    0x000000,
+    dropShadowAlpha:    0.8,
+  });
+
+  for (const key of Object.keys(configs)) {
+    const [i, j] = key.split(",").map(Number);
+    const center = canvas.grid.getCenterPoint({ i, j });
+    const text   = new PIXI.Text("⚙", style);
+    text.anchor.set(0.5, 0.5);
+    text.x = center.x;
+    text.y = center.y;
+    MM.hexConfigGfx.addChild(text);
+  }
+}
+
+// ── Config hierarchy resolver ─────────────────────────────────────────────────
+
+export function getResolvedConfig(i, j) {
+  const key       = cellKey(i, j);
+  const mapCfg    = getMapConfig() ?? {};
+  const terrainId = getTerrainCells()[key];
+  const terrain   = terrainId ? (getTerrainTypes()[terrainId] ?? null) : null;
+  const terrainCfg = terrain?.data ?? {};
+  const regionId  = getRegionCells()[key];
+  const region    = regionId ? (getRegions()[regionId] ?? null) : null;
+  const regionCfg = region?.data ?? {};
+  const hexCfg    = getHexConfigs()[key] ?? {};
+
+  // Tags: collect from all levels with source labels
+  const tagsWithSource = [
+    ...(mapCfg.tags     ?? []).map(t => ({ tag: t, from: "Map" })),
+    ...(terrainCfg.tags ?? []).map(t => ({ tag: t, from: "Terrain" })),
+    ...(regionCfg.tags  ?? []).map(t => ({ tag: t, from: "Region" })),
+    ...(hexCfg.tags     ?? []).map(t => ({ tag: t, from: "Hex" })),
+  ];
+
+  // Encounter: Map uses data-presence; sub-levels require override:true
+  const _hasEnc = (e, isMap) => isMap
+    ? !!(e?.uuid || e?.die || e?.threshold)
+    : e?.override === true && !!(e?.uuid || e?.die || e?.threshold);
+  let encounter = null, inheritedFrom = null;
+  if (_hasEnc(mapCfg.encounter,     true))  { encounter = { ...mapCfg.encounter };     inheritedFrom = "Map";     }
+  if (_hasEnc(terrainCfg.encounter, false)) { encounter = { ...terrainCfg.encounter }; inheritedFrom = "Terrain"; }
+  if (_hasEnc(regionCfg.encounter,  false)) { encounter = { ...regionCfg.encounter };  inheritedFrom = "Region";  }
+  if (_hasEnc(hexCfg.encounter,     false)) { encounter = { ...hexCfg.encounter };     inheritedFrom = "Hex";     }
+
+  return {
+    hexName:        hexCfg.name || null,
+    tags:           tagsWithSource.map(t => t.tag),
+    tagsWithSource,
+    encounter:      encounter ? { ...encounter, inheritedFrom } : null,
+  };
+}
+
 // ── Cursor preview ────────────────────────────────────────────────────────────
 
 export function renderCursorPreview(worldX, worldY) {
@@ -328,6 +409,65 @@ export function clearCursorPreview() {
   MM.cursorGfx?.clear();
 }
 
+// ── Cell hover tooltip (inspect mode) ────────────────────────────────────────
+
+let _tooltipEl = null;
+
+function _ensureTooltip() {
+  if (!_tooltipEl || !document.body.contains(_tooltipEl)) {
+    _tooltipEl = document.createElement("div");
+    _tooltipEl.id = "cm-cell-tooltip";
+    document.body.appendChild(_tooltipEl);
+  }
+  return _tooltipEl;
+}
+
+function _hideHoverTooltip() {
+  if (_tooltipEl) _tooltipEl.style.display = "none";
+}
+
+function _updateHoverTooltip(worldX, worldY, screenX, screenY) {
+  const offset  = canvas.grid.getOffset({ x: worldX, y: worldY });
+  const terrain = getTerrainAtOffset(offset.i, offset.j);
+  const region  = getRegionAtOffset(offset.i, offset.j);
+  if (!terrain && !region) { _hideHoverTooltip(); return; }
+
+  const tip = _ensureTooltip();
+  let html = "";
+  if (terrain) html += `<div class="cm-tip-row"><span class="cm-tip-swatch" style="background:${terrain.color}"></span>${terrain.name}</div>`;
+  if (region)  html += `<div class="cm-tip-row"><span class="cm-tip-swatch" style="background:${region.color}"></span>${region.name}</div>`;
+  tip.innerHTML      = html;
+  tip.style.left     = `${screenX + 14}px`;
+  tip.style.top      = `${screenY + 14}px`;
+  tip.style.display  = "block";
+}
+
+export function destroyHoverTooltip() {
+  if (_tooltipEl) { _tooltipEl.remove(); _tooltipEl = null; }
+}
+
+function _renderInspectCursor(worldX, worldY) {
+  if (!MM.cursorGfx) return;
+  MM.cursorGfx.clear();
+  const offset = canvas.grid.getOffset({ x: worldX, y: worldY });
+  const center = canvas.grid.getCenterPoint({ i: offset.i, j: offset.j });
+  const shape  = canvas.grid.getShape();
+  MM.cursorGfx.lineStyle(1, 0xffffff, 0.3);
+  MM.cursorGfx.beginFill(0xffffff, 0.04);
+  if (shape?.length > 0) {
+    MM.cursorGfx.moveTo(center.x + shape[0].x, center.y + shape[0].y);
+    for (let k = 1; k < shape.length; k++) MM.cursorGfx.lineTo(center.x + shape[k].x, center.y + shape[k].y);
+    MM.cursorGfx.closePath();
+  } else {
+    MM.cursorGfx.drawCircle(center.x, center.y, canvas.grid.size / 2);
+  }
+  MM.cursorGfx.endFill();
+}
+
+function _hasActiveBrush() {
+  return MM.erasing || !!MM.activeTerrainId || !!MM.activeRegionId;
+}
+
 // ── Paint engine ──────────────────────────────────────────────────────────────
 
 let _paintDebounce = null;
@@ -338,7 +478,14 @@ export function startPainting() {
 
   const onDown = (event) => {
     if (event.data.button !== 0) return;
+    event.stopPropagation();
     const pos = event.data.getLocalPosition(canvas.stage);
+    if (MM.configureMode) {
+      const off = canvas.grid.getOffset({ x: pos.x, y: pos.y });
+      Hooks.call("cm:openHexConfig", off.i, off.j);
+      return;
+    }
+    if (!_hasActiveBrush()) return;
     MM.isDragging = true;
     _initPendingCells();
     _applyBrush(pos);
@@ -346,9 +493,20 @@ export function startPainting() {
 
   const onMove = (event) => {
     const pos = event.data.getLocalPosition(canvas.stage);
-    renderCursorPreview(pos.x, pos.y);
-    if (!MM.isDragging) return;
-    _applyBrush(pos);
+    if (MM.configureMode) {
+      _hideHoverTooltip();
+      _renderInspectCursor(pos.x, pos.y);
+      return;
+    }
+    if (_hasActiveBrush()) {
+      _hideHoverTooltip();
+      renderCursorPreview(pos.x, pos.y);
+      if (MM.isDragging) _applyBrush(pos);
+    } else {
+      clearCursorPreview();
+      _renderInspectCursor(pos.x, pos.y);
+      _updateHoverTooltip(pos.x, pos.y, event.clientX ?? 0, event.clientY ?? 0);
+    }
   };
 
   const onUp = async () => {
@@ -369,6 +527,7 @@ export function stopPainting() {
   MM.painting   = false;
   MM.isDragging = false;
   clearCursorPreview();
+  _hideHoverTooltip();
 
   const h = MM._paintHandlers;
   if (h) {
@@ -378,37 +537,34 @@ export function stopPainting() {
     MM._paintHandlers = null;
   }
 
-  if (MM._pendingTerrain !== null || MM._pendingRegion !== null) {
+  if (MM._pendingTerrain !== null || MM._pendingRegion !== null || MM._pendingHexConfig !== null) {
     clearTimeout(_paintDebounce);
-    const terrain = MM._pendingTerrain;
-    const region  = MM._pendingRegion;
-    MM._pendingTerrain = null;
-    MM._pendingRegion  = null;
-    const prevTerrain = MM._sentTerrain;
-    const prevRegion  = MM._sentRegion;
-    // Keep _isPainting = true until the fire-and-forget saves resolve so the
-    // updateScene hook doesn't re-render from stale flags mid-save.
+    const terrain   = MM._pendingTerrain;
+    const region    = MM._pendingRegion;
+    const hexConfig = MM._pendingHexConfig;
+    MM._pendingTerrain   = null;
+    MM._pendingRegion    = null;
+    MM._pendingHexConfig = null;
+    const prevTerrain   = MM._sentTerrain;
+    const prevRegion    = MM._sentRegion;
+    const prevHexConfig = MM._sentHexConfig;
     const saves = [];
-    if (terrain !== null)
-      saves.push(setSceneFlag("terrainCells", terrain, prevTerrain ?? getTerrainCells()));
-    if (region !== null)
-      saves.push(setSceneFlag("regionCells",  region,  prevRegion  ?? getRegionCells()));
+    if (terrain   !== null) saves.push(setSceneFlag("terrainCells", terrain,   prevTerrain   ?? getTerrainCells()));
+    if (region    !== null) saves.push(setSceneFlag("regionCells",  region,    prevRegion    ?? getRegionCells()));
+    if (hexConfig !== null) saves.push(setSceneFlag("hexConfigs",   hexConfig, prevHexConfig ?? getHexConfigs()));
     Promise.all(saves).finally(() => { MM._isPainting = false; });
   } else {
     MM._isPainting = false;
   }
-  MM._sentTerrain = null;
-  MM._sentRegion  = null;
+  MM._sentTerrain   = null;
+  MM._sentRegion    = null;
+  MM._sentHexConfig = null;
 }
 
 function _initPendingCells() {
-  // Use _sentTerrain/_sentRegion as the baseline when a save is still in-flight.
-  // Falling back to scene flags would read stale data and cause the new stroke
-  // to overwrite recently-painted cells with a partial set on flush.
-  if (MM._pendingTerrain === null)
-    MM._pendingTerrain = foundry.utils.deepClone(MM._sentTerrain ?? getTerrainCells());
-  if (MM._pendingRegion === null)
-    MM._pendingRegion  = foundry.utils.deepClone(MM._sentRegion  ?? getRegionCells());
+  if (MM._pendingTerrain   === null) MM._pendingTerrain   = foundry.utils.deepClone(MM._sentTerrain   ?? getTerrainCells());
+  if (MM._pendingRegion    === null) MM._pendingRegion    = foundry.utils.deepClone(MM._sentRegion    ?? getRegionCells());
+  if (MM._pendingHexConfig === null) MM._pendingHexConfig = foundry.utils.deepClone(MM._sentHexConfig ?? getHexConfigs());
 }
 
 function _applyBrush(pos) {
@@ -422,8 +578,9 @@ function _applyBrush(pos) {
     const key = cellKey(i, j);
 
     if (MM.erasing) {
-      if (MM.eraseTerrain && key in MM._pendingTerrain) { delete MM._pendingTerrain[key]; changed = true; }
-      if (MM.eraseRegion  && key in MM._pendingRegion)  { delete MM._pendingRegion[key];  changed = true; }
+      if (MM.eraseTerrain   && key in MM._pendingTerrain)   { delete MM._pendingTerrain[key];   changed = true; }
+      if (MM.eraseRegion    && key in MM._pendingRegion)    { delete MM._pendingRegion[key];    changed = true; }
+      if (MM.eraseHexConfig && key in MM._pendingHexConfig) { delete MM._pendingHexConfig[key]; changed = true; }
     } else {
       if (MM.activeTerrainId) {
         const blocked = MM.hardTerrainBorders
@@ -458,34 +615,33 @@ function _applyBrush(pos) {
 
 export async function flushPaint() {
   clearTimeout(_paintDebounce);
-  if (MM._pendingTerrain === null && MM._pendingRegion === null) {
+  if (MM._pendingTerrain === null && MM._pendingRegion === null && MM._pendingHexConfig === null) {
     MM._isPainting = false;
     return;
   }
 
-  const terrain = MM._pendingTerrain;
-  const region  = MM._pendingRegion;
-  MM._pendingTerrain = null;
-  MM._pendingRegion  = null;
+  const terrain   = MM._pendingTerrain;
+  const region    = MM._pendingRegion;
+  const hexConfig = MM._pendingHexConfig;
+  MM._pendingTerrain   = null;
+  MM._pendingRegion    = null;
+  MM._pendingHexConfig = null;
 
-  // Capture previous sent state as the diff baseline BEFORE updating _sent.
-  // This gives setSceneFlag an accurate "what the server currently has" so its
-  // -=key deletions are computed correctly, without reading stale flag data.
-  const prevTerrain = MM._sentTerrain;
-  const prevRegion  = MM._sentRegion;
-  if (terrain !== null) MM._sentTerrain = terrain;
-  if (region  !== null) MM._sentRegion  = region;
+  const prevTerrain   = MM._sentTerrain;
+  const prevRegion    = MM._sentRegion;
+  const prevHexConfig = MM._sentHexConfig;
+  if (terrain   !== null) MM._sentTerrain   = terrain;
+  if (region    !== null) MM._sentRegion    = region;
+  if (hexConfig !== null) MM._sentHexConfig = hexConfig;
 
-  if (terrain !== null) renderTerrainOverlay(terrain);
-  if (region  !== null) renderRegionOverlay(region);
+  if (terrain   !== null) renderTerrainOverlay(terrain);
+  if (region    !== null) renderRegionOverlay(region);
+  if (hexConfig !== null) renderHexConfigOverlay(hexConfig);
 
   await Promise.all([
-    terrain !== null
-      ? setSceneFlag("terrainCells", terrain, prevTerrain ?? getTerrainCells())
-      : Promise.resolve(),
-    region !== null
-      ? setSceneFlag("regionCells",  region,  prevRegion  ?? getRegionCells())
-      : Promise.resolve(),
+    terrain   !== null ? setSceneFlag("terrainCells", terrain,   prevTerrain   ?? getTerrainCells()) : Promise.resolve(),
+    region    !== null ? setSceneFlag("regionCells",  region,    prevRegion    ?? getRegionCells())  : Promise.resolve(),
+    hexConfig !== null ? setSceneFlag("hexConfigs",   hexConfig, prevHexConfig ?? getHexConfigs())   : Promise.resolve(),
   ]);
   MM._isPainting = false;
 }

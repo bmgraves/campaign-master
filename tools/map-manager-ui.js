@@ -8,18 +8,20 @@ import {
   MODULE_ID,
   getTerrainTypes, getRegions,
   getTerrainCells, getRegionCells,
+  getHexConfigs, getMapConfig,
   setSceneFlag,
   cellKey,
   startPainting, stopPainting,
-  renderTerrainOverlay, renderRegionOverlay,
+  renderTerrainOverlay, renderRegionOverlay, renderHexConfigOverlay,
   flushPaint,
+  destroyHoverTooltip,
 } from "./map-manager.js";
 
 // ── Open / close ──────────────────────────────────────────────────────────────
 
 export function toggleMapManagerUI() {
   const existing = document.getElementById("cm-map-manager");
-  if (existing) { existing.remove(); stopPainting(); return; }
+  if (existing) { existing.remove(); stopPainting(); destroyHoverTooltip(); return; }
   buildMapManagerUI();
 }
 
@@ -38,6 +40,9 @@ function buildMapManagerUI() {
   _makeDraggable(panel, panel.querySelector(".cm-panel-header"));
   _bindEvents(panel);
   _refreshAll(panel);
+  // Start canvas mode immediately so events are intercepted even before
+  // a brush is selected, preventing the previous canvas tool from firing.
+  startPainting();
 }
 
 // ── HTML template ─────────────────────────────────────────────────────────────
@@ -99,6 +104,9 @@ function _panelHTML() {
     <button id="cm-erase-btn" class="cm-mode-btn">
       <i class="fa-solid fa-eraser"></i> Erase
     </button>
+    <button id="cm-configure-btn" class="cm-mode-btn">
+      <i class="fa-solid fa-gear"></i> Single
+    </button>
   </div>
 
   <div id="cm-erase-options" class="cm-erase-options" style="display:none">
@@ -109,6 +117,10 @@ function _panelHTML() {
     <label class="cm-checkbox-row">
       <input type="checkbox" id="cm-erase-region" ${MM.eraseRegion ? "checked" : ""}>
       <span>Region</span>
+    </label>
+    <label class="cm-checkbox-row">
+      <input type="checkbox" id="cm-erase-hexconfig" ${MM.eraseHexConfig ? "checked" : ""}>
+      <span>Hex Config</span>
     </label>
   </div>
 
@@ -139,7 +151,7 @@ function _panelHTML() {
 function _bindEvents(panel) {
   // Close
   panel.querySelector("#cm-close-mm").addEventListener("click", () => {
-    panel.remove(); stopPainting();
+    panel.remove(); stopPainting(); destroyHoverTooltip();
   });
 
   // Visibility toggles
@@ -154,6 +166,12 @@ function _bindEvents(panel) {
     game.settings.set(MODULE_ID, "regionVisible", MM.regionVisible);
     if (MM.regionGfx) MM.regionGfx.visible = MM.regionVisible;
     e.currentTarget.classList.toggle("active", MM.regionVisible);
+  });
+
+  // Map Config
+  panel.querySelector("#cm-map-config").addEventListener("click", async () => {
+    const result = await _showConfigDialog("Map Config", null, null, getMapConfig() ?? {}, []);
+    if (result !== null) await setSceneFlag("mapConfig", result.data);
   });
 
   // Add terrain type
@@ -197,15 +215,23 @@ function _bindEvents(panel) {
   });
 
   // Paint / Erase mode buttons
+  // Canvas handlers stay active while the panel is open; these only toggle state.
   panel.querySelector("#cm-paint-btn").addEventListener("click", () => {
-    if (MM.painting && !MM.erasing) { stopPainting(); }
-    else { MM.erasing = false; startPainting(); _ensureVisible(panel); }
+    MM.erasing       = false;
+    MM.configureMode = false;
     _refreshModeButtons(panel);
     _refreshActiveLabel(panel);
   });
   panel.querySelector("#cm-erase-btn").addEventListener("click", () => {
-    if (MM.erasing) { stopPainting(); MM.erasing = false; }
-    else { MM.erasing = true; startPainting(); _ensureVisible(panel); }
+    MM.erasing       = !MM.erasing;
+    MM.configureMode = false;
+    if (MM.erasing) _ensureVisible(panel);
+    _refreshModeButtons(panel);
+    _refreshActiveLabel(panel);
+  });
+  panel.querySelector("#cm-configure-btn").addEventListener("click", () => {
+    MM.configureMode = !MM.configureMode;
+    MM.erasing       = false;
     _refreshModeButtons(panel);
     _refreshActiveLabel(panel);
   });
@@ -216,6 +242,9 @@ function _bindEvents(panel) {
   });
   panel.querySelector("#cm-erase-region").addEventListener("change", (e) => {
     MM.eraseRegion = e.target.checked;
+  });
+  panel.querySelector("#cm-erase-hexconfig").addEventListener("change", (e) => {
+    MM.eraseHexConfig = e.target.checked;
   });
 
   // Hard borders
@@ -238,8 +267,7 @@ function _bindEvents(panel) {
     }
     MM.activeTerrainId = MM.activeTerrainId === row.dataset.id ? null : row.dataset.id;
     MM.erasing = false;
-    startPainting();
-    _ensureVisible(panel);
+    if (MM.activeTerrainId) _ensureVisible(panel);
     _refreshModeButtons(panel);
     _refreshTerrainList(panel);
     _refreshActiveLabel(panel);
@@ -257,8 +285,7 @@ function _bindEvents(panel) {
     }
     MM.activeRegionId = MM.activeRegionId === row.dataset.id ? null : row.dataset.id;
     MM.erasing = false;
-    startPainting();
-    _ensureVisible(panel);
+    if (MM.activeRegionId) _ensureVisible(panel);
     _refreshModeButtons(panel);
     _refreshRegionList(panel);
     _refreshActiveLabel(panel);
@@ -270,30 +297,27 @@ function _bindEvents(panel) {
       title: "Clear All Map Data",
       content: `<p>Clear all painted data from this scene?</p>
         <p><label><input type="checkbox" id="dlg-clear-terrain" checked> Terrain fills</label><br>
-        <label><input type="checkbox" id="dlg-clear-region" checked> Region borders</label></p>`,
+        <label><input type="checkbox" id="dlg-clear-region" checked> Region borders</label><br>
+        <label><input type="checkbox" id="dlg-clear-hexconfig" checked> Hex Configs</label></p>`,
       yes: (html) => ({
-        terrain: html.find("#dlg-clear-terrain")[0].checked,
-        region:  html.find("#dlg-clear-region")[0].checked,
+        terrain:   html.find("#dlg-clear-terrain")[0].checked,
+        region:    html.find("#dlg-clear-region")[0].checked,
+        hexConfig: html.find("#dlg-clear-hexconfig")[0].checked,
       }),
       no: () => null,
     });
     if (!confirmed) return;
-    MM._pendingTerrain = null;
-    MM._pendingRegion  = null;
-    // Use {} (not null) so _initPendingCells treats the cleared state as its
-    // baseline even before the server confirms the save.
-    if (confirmed.terrain) MM._sentTerrain = {};
-    if (confirmed.region)  MM._sentRegion  = {};
+    MM._pendingTerrain   = null;
+    MM._pendingRegion    = null;
+    MM._pendingHexConfig = null;
+    if (confirmed.terrain)   MM._sentTerrain   = {};
+    if (confirmed.region)    MM._sentRegion    = {};
+    if (confirmed.hexConfig) MM._sentHexConfig = {};
     MM._isPainting = false;
     const clears = [];
-    if (confirmed.terrain) {
-      clears.push(setSceneFlag("terrainCells", {}));
-      renderTerrainOverlay({});
-    }
-    if (confirmed.region) {
-      clears.push(setSceneFlag("regionCells", {}));
-      renderRegionOverlay({});
-    }
+    if (confirmed.terrain)   { clears.push(setSceneFlag("terrainCells", {})); renderTerrainOverlay({}); }
+    if (confirmed.region)    { clears.push(setSceneFlag("regionCells",  {})); renderRegionOverlay({});  }
+    if (confirmed.hexConfig) { clears.push(setSceneFlag("hexConfigs",   {})); renderHexConfigOverlay({}); }
     await Promise.all(clears);
   });
 }
@@ -342,10 +366,11 @@ function _updateBrushDisplay(panel) {
 }
 
 function _refreshModeButtons(panel) {
-  panel.querySelector("#cm-paint-btn").classList.toggle("active", MM.painting && !MM.erasing);
+  const inPaintMode = !MM.erasing && !MM.configureMode && (!!MM.activeTerrainId || !!MM.activeRegionId);
+  panel.querySelector("#cm-paint-btn").classList.toggle("active", inPaintMode);
   panel.querySelector("#cm-erase-btn").classList.toggle("active", MM.erasing);
-  const eraseOpts = panel.querySelector("#cm-erase-options");
-  eraseOpts.style.display = MM.erasing ? "flex" : "none";
+  panel.querySelector("#cm-configure-btn").classList.toggle("active", MM.configureMode);
+  panel.querySelector("#cm-erase-options").style.display = MM.erasing ? "flex" : "none";
 }
 
 function _refreshActiveLabel(panel) {
@@ -355,8 +380,10 @@ function _refreshActiveLabel(panel) {
   const t  = MM.activeTerrainId && types[MM.activeTerrainId];
   const r  = MM.activeRegionId  && regions[MM.activeRegionId];
 
-  if (MM.erasing) {
-    const what = [MM.eraseTerrain && "terrain", MM.eraseRegion && "region"].filter(Boolean).join(" + ") || "nothing";
+  if (MM.configureMode) {
+    label.innerHTML = `Mode: <b style="color:#aaddff">Configure Hex</b> — click a cell`;
+  } else if (MM.erasing) {
+    const what = [MM.eraseTerrain && "terrain", MM.eraseRegion && "region", MM.eraseHexConfig && "config"].filter(Boolean).join(" + ") || "nothing";
     label.innerHTML = `Mode: <b style="color:#e07070">Erasing ${what}</b>`;
   } else if (t || r) {
     const parts = [];
@@ -419,10 +446,12 @@ function _showEditDialog(title, currentName, currentColor) {
 async function _editTerrainType(id, panel) {
   const type = getTerrainTypes()[id];
   if (!type) return;
-  const result = await _showEditDialog(`Edit Terrain: ${type.name}`, type.name, type.color);
-  if (!result?.name) return;
+  const mapCfg  = getMapConfig() ?? {};
+  const parents = [{ label: "Map", config: mapCfg }];
+  const result  = await _showConfigDialog(`Edit Terrain: ${type.name}`, type.name, type.color, type.data ?? {}, parents, "Terrain");
+  if (!result) return;
   const updated = foundry.utils.deepClone(getTerrainTypes());
-  updated[id] = { ...updated[id], name: result.name, color: result.color };
+  updated[id] = { ...updated[id], name: result.name, color: result.color, data: result.data };
   await setSceneFlag("terrainTypes", updated);
   _refreshTerrainList(panel);
   _refreshActiveLabel(panel);
@@ -430,17 +459,283 @@ async function _editTerrainType(id, panel) {
 }
 
 async function _editRegion(id, panel) {
-  const region = getRegions()[id];
+  const region  = getRegions()[id];
   if (!region) return;
-  const result = await _showEditDialog(`Edit Region: ${region.name}`, region.name, region.color);
-  if (!result?.name) return;
+  const mapCfg  = getMapConfig() ?? {};
+  const parents = [{ label: "Map", config: mapCfg }];
+  const result  = await _showConfigDialog(`Edit Region: ${region.name}`, region.name, region.color, region.data ?? {}, parents, "Region");
+  if (!result) return;
   const updated = foundry.utils.deepClone(getRegions());
-  updated[id] = { ...updated[id], name: result.name, color: result.color };
+  updated[id] = { ...updated[id], name: result.name, color: result.color, data: result.data };
   await setSceneFlag("regions", updated);
   _refreshRegionList(panel);
   _refreshActiveLabel(panel);
   renderRegionOverlay();
 }
+
+// ── Config dialog ─────────────────────────────────────────────────────────────
+// _showConfigDialog(title, name, color, data, parentChain, currentLabel)
+//   name/color: string — shown for terrain/region edits; pass null for hex/map-only dialogs
+//   data: { tags, encounter } — the current config for this level
+//   parentChain: [{label, config}] — parent configs in order (Map first)
+//   currentLabel: "Terrain"|"Region"|"Hex"|null — null = Map level (no override concept)
+//
+// Encounter inheritance chain:
+//   Map (data-presence) → Terrain/Region/Hex (require override:true)
+//   Chain display: [Map] → [nodes with override] → [current if override checked]
+//   Active node (inherited source) = last node before current (or current if override=true)
+
+function _showConfigDialog(title, name, color, data = {}, parentChain = [], currentLabel = null) {
+  const tags       = data.tags ?? [];
+  const thisEnc    = data.encounter ?? {};
+  const hasName    = name !== null && name !== undefined;
+  const isMapLevel = !currentLabel;
+  const isHexLevel = !hasName && !!currentLabel;
+
+  // Override is "on" if this level explicitly overrides, or it's the map level
+  const isOverrideInit = isMapLevel ? true : (thisEnc.override === true);
+
+  // Compute inherited encounter: most-specific parent with data
+  // Map = data-presence; sub-levels = override===true + data
+  let inheritedEnc = null;
+  for (const p of parentChain) {
+    const pEnc = p.config?.encounter;
+    if (!pEnc) continue;
+    const isMap   = p.label === "Map";
+    const hasData = isMap
+      ? !!(pEnc.uuid || pEnc.die || pEnc.threshold)
+      : pEnc.override === true && !!(pEnc.uuid || pEnc.die || pEnc.threshold);
+    if (hasData) inheritedEnc = pEnc;
+  }
+
+  const inheritedTags = parentChain.flatMap(p =>
+    (p.config?.tags ?? []).map(t =>
+      `<span class="cm-tag-chip cm-tag-inherited" title="from ${p.label}">${_esc(t)} <em>(${p.label})</em></span>`
+    )
+  ).join("");
+
+  const nameRow = hasName ? `
+    <div class="cm-config-row"><label>Name</label>
+      <input id="dlg-cfg-name" type="text" value="${_esc(name)}">
+    </div>
+    <div class="cm-config-row"><label>Color</label>
+      <input id="dlg-cfg-color" type="color" value="${color ?? "#44aa44"}">
+    </div>` : "";
+
+  const hexNameRow = isHexLevel ? `
+    <div class="cm-config-row"><label>Hex Name</label>
+      <input id="dlg-hex-name" type="text" placeholder="Optional label…" value="${_esc(data.name ?? "")}">
+    </div>` : "";
+
+  const tagsSection = `
+    <div class="cm-config-section-title">Tags</div>
+    ${inheritedTags ? `<div class="cm-tag-list cm-inherited-tags">${inheritedTags}</div>` : ""}
+    <div class="cm-tag-list" id="dlg-tag-list">
+      ${tags.map(t => `<span class="cm-tag-chip" data-tag="${_esc(t)}">${_esc(t)}<button class="cm-tag-remove" data-tag="${_esc(t)}">×</button></span>`).join("")}
+    </div>
+    <div class="cm-tag-row">
+      <input id="dlg-tag-input" type="text" placeholder="Add tag…">
+      <button id="dlg-tag-add" type="button">+</button>
+    </div>`;
+
+  const overrideRow = !isMapLevel ? `
+    <div class="cm-config-override">
+      <input type="checkbox" id="dlg-enc-override" ${isOverrideInit ? "checked" : ""}>
+      <label for="dlg-enc-override">Override encounter</label>
+    </div>` : "";
+
+  // Encounter fields — values and disabled state set dynamically in render callback
+  const encFields = `
+    <div id="dlg-enc-fields">
+      <div class="cm-config-row"><label>Table/Macro UUID</label>
+        <input id="dlg-enc-uuid" type="text" placeholder="Drag to link or paste UUID" value="">
+      </div>
+      <div class="cm-config-row"><label>Frequency</label>
+        <select id="dlg-enc-freq">
+          <option value="daily">Daily</option>
+          <option value="entering">Entering Hex</option>
+          <option value="leaving">Leaving Hex</option>
+        </select>
+      </div>
+      <div class="cm-config-row"><label>Encounter Die</label>
+        <input id="dlg-enc-die" type="text" placeholder="1d6" value="">
+      </div>
+      <div class="cm-config-row"><label>Encounter Threshold</label>
+        <input id="dlg-enc-threshold" type="text" placeholder="1,2 or 1-3" value="">
+      </div>
+    </div>`;
+
+  const content = `<div class="cm-config-dialog">
+    ${nameRow}
+    ${hexNameRow}
+    ${tagsSection}
+    <div class="cm-config-section-title">Encounter Manager</div>
+    <div class="cm-encounter-section">
+      <div id="dlg-chain-display" class="cm-chain-display"></div>
+      ${overrideRow}
+      ${encFields}
+    </div>
+  </div>`;
+
+  return new Promise((resolve) => {
+    const dlg = new Dialog({
+      title,
+      content,
+      buttons: {
+        save: {
+          icon:  '<i class="fa-solid fa-check"></i>',
+          label: "Save",
+          callback: (html) => {
+            const el             = html[0] ?? html;
+            const tList          = [...el.querySelectorAll("#dlg-tag-list .cm-tag-chip")].map(c => c.dataset.tag).filter(Boolean);
+            const overrideChecked = isMapLevel ? true : (el.querySelector("#dlg-enc-override")?.checked ?? false);
+            let encounter;
+            if (isMapLevel || overrideChecked) {
+              encounter = {
+                ...(!isMapLevel && { override: true }),
+                uuid:      el.querySelector("#dlg-enc-uuid")?.value.trim()       ?? "",
+                frequency: el.querySelector("#dlg-enc-freq")?.value              ?? "daily",
+                die:       el.querySelector("#dlg-enc-die")?.value.trim()        ?? "",
+                threshold: el.querySelector("#dlg-enc-threshold")?.value.trim()  ?? "",
+              };
+            } else {
+              encounter = {};
+            }
+            const result = { data: { tags: tList, encounter } };
+            if (hasName) {
+              result.name  = el.querySelector("#dlg-cfg-name")?.value.trim() || name;
+              result.color = el.querySelector("#dlg-cfg-color")?.value ?? color;
+            }
+            if (isHexLevel) {
+              result.data.name = el.querySelector("#dlg-hex-name")?.value.trim() ?? "";
+            }
+            resolve(result);
+          },
+        },
+        cancel: {
+          icon:     '<i class="fa-solid fa-times"></i>',
+          label:    "Cancel",
+          callback: () => resolve(null),
+        },
+      },
+      default: "save",
+      close:   () => resolve(null),
+      render:  (html) => {
+        const el = html[0] ?? html;
+        el.closest?.(".app.dialog")?.classList.add("cm-config-dialog-app");
+
+        const chainEl    = el.querySelector("#dlg-chain-display");
+        const overrideCb = el.querySelector("#dlg-enc-override");
+
+        // Build chain node list for display
+        // Nodes: Map (always) + intermediate parents with override=true + current if overrideChecked
+        // State: "current" if it's the level being edited; "active" if last & not current; "past" otherwise
+        function buildChainNodes(isOverrideChecked) {
+          if (isMapLevel) return [];
+          const nodes = [{ label: "Map" }];
+          for (let pi = 1; pi < parentChain.length; pi++) {
+            const p    = parentChain[pi];
+            const pEnc = p.config?.encounter;
+            if (pEnc?.override === true && !!(pEnc.uuid || pEnc.die || pEnc.threshold)) {
+              nodes.push({ label: p.label });
+            }
+          }
+          if (isOverrideChecked) nodes.push({ label: currentLabel });
+          return nodes.map((n, idx) => {
+            const isLast    = idx === nodes.length - 1;
+            const isCurrent = n.label === currentLabel;
+            return { label: n.label, state: isCurrent ? "current" : (isLast ? "active" : "past") };
+          });
+        }
+
+        function renderChain(isOverrideChecked) {
+          if (!chainEl || isMapLevel) return;
+          const nodes = buildChainNodes(isOverrideChecked);
+          chainEl.innerHTML = nodes.map((n, idx) =>
+            `${idx > 0 ? '<span class="cm-chain-arrow">→</span>' : ''}<span class="cm-chain-node cm-chain-${n.state}">${n.label}</span>`
+          ).join("");
+        }
+
+        function setEncFields(isOverrideChecked) {
+          const enc      = isOverrideChecked ? thisEnc : (inheritedEnc ?? {});
+          const disabled = !isOverrideChecked && !isMapLevel;
+          const uuidEl   = el.querySelector("#dlg-enc-uuid");
+          const freqEl   = el.querySelector("#dlg-enc-freq");
+          const dieEl    = el.querySelector("#dlg-enc-die");
+          const thrEl    = el.querySelector("#dlg-enc-threshold");
+          if (uuidEl) { uuidEl.value    = enc.uuid      ?? "";       uuidEl.disabled = disabled; }
+          if (dieEl)  { dieEl.value     = enc.die       ?? "";       dieEl.disabled  = disabled; }
+          if (thrEl)  { thrEl.value     = enc.threshold ?? "";       thrEl.disabled  = disabled; }
+          if (freqEl) { freqEl.value    = enc.frequency ?? "daily";  freqEl.disabled = disabled; }
+        }
+
+        renderChain(isOverrideInit);
+        setEncFields(isOverrideInit);
+
+        overrideCb?.addEventListener("change", (e) => {
+          renderChain(e.target.checked);
+          setEncFields(e.target.checked);
+        });
+
+        el.querySelector("#dlg-tag-add")?.addEventListener("click", () => {
+          const inp = el.querySelector("#dlg-tag-input");
+          const tag = inp?.value.trim();
+          if (!tag) return;
+          const list = el.querySelector("#dlg-tag-list");
+          const chip = document.createElement("span");
+          chip.className   = "cm-tag-chip";
+          chip.dataset.tag = tag;
+          chip.innerHTML   = `${_esc(tag)}<button class="cm-tag-remove" data-tag="${_esc(tag)}">×</button>`;
+          chip.querySelector(".cm-tag-remove").addEventListener("click", () => chip.remove());
+          list.appendChild(chip);
+          inp.value = "";
+        });
+        el.querySelectorAll(".cm-tag-remove").forEach(btn =>
+          btn.addEventListener("click", () => btn.closest(".cm-tag-chip").remove())
+        );
+      },
+    });
+    dlg.render(true);
+  });
+}
+
+function _esc(str) {
+  return String(str ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function _getParentConfigs(i, j) {
+  const key     = cellKey(i, j);
+  const parents = [{ label: "Map", config: getMapConfig() ?? {} }];
+  const terrainId = getTerrainCells()?.[key];
+  if (terrainId) {
+    const t = getTerrainTypes()[terrainId];
+    if (t) parents.push({ label: "Terrain", config: t.data ?? {} });
+  }
+  const regionId = getRegionCells()?.[key];
+  if (regionId) {
+    const r = getRegions()[regionId];
+    if (r) parents.push({ label: "Region", config: r.data ?? {} });
+  }
+  return parents;
+}
+
+// ── Hex Config hook ───────────────────────────────────────────────────────────
+
+Hooks.on("cm:openHexConfig", async (i, j) => {
+  const key     = cellKey(i, j);
+  const cfg     = getHexConfigs()[key] ?? {};
+  const parents = _getParentConfigs(i, j);
+  const result  = await _showConfigDialog(`Hex Config [${i}, ${j}]`, null, null, cfg, parents, "Hex");
+  if (result === null) return;
+  const all = foundry.utils.deepClone(getHexConfigs());
+  const d         = result.data;
+  const hasEnc    = d?.encounter?.override === true && !!(d.encounter?.uuid || d.encounter?.die || d.encounter?.threshold);
+  const isEmpty   = !d || ((!d.tags || !d.tags.length) && !d.name && !hasEnc);
+  if (isEmpty) delete all[key]; else all[key] = d;
+  MM._sentHexConfig = foundry.utils.deepClone(all);
+  await setSceneFlag("hexConfigs", all);
+  renderHexConfigOverlay();
+});
 
 // ── Delete handlers ───────────────────────────────────────────────────────────
 

@@ -11,9 +11,10 @@ import {
   MM,
   initMapGfx, destroyMapGfx,
   migrateIfNeeded,
-  renderTerrainOverlay, renderRegionOverlay,
+  renderTerrainOverlay, renderRegionOverlay, renderHexConfigOverlay,
   getTerrainAtPoint, getTerrainAtOffset,
   getRegionAtPoint, getRegionAtOffset,
+  getResolvedConfig,
 } from "./tools/map-manager.js";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -67,7 +68,7 @@ Hooks.on("getSceneControlButtons", (controls) => {
         visible: true,
         onChange: (event, active) => {
           game.settings.set(MODULE_ID, "trackerActive", active);
-          if (active) startTracker(getTerrainAtPoint); else stopTracker();
+          if (active) startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedConfig }); else stopTracker();
         },
       },
       "map-manager": {
@@ -88,7 +89,7 @@ Hooks.on("getSceneControlButtons", (controls) => {
 Hooks.once("ready", () => {
   console.log("Campaign Master | Ready.");
   if (game.settings.get(MODULE_ID, "highlighterActive")) startHighlighter();
-  if (game.settings.get(MODULE_ID, "trackerActive"))     startTracker(getTerrainAtPoint);
+  if (game.settings.get(MODULE_ID, "trackerActive"))     startTracker({ getTerrainAtPoint, getRegionAtPoint, getResolvedConfig });
 });
 
 // ── Canvas hooks ──────────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ Hooks.on("canvasReady", async () => {
 
   renderTerrainOverlay();
   renderRegionOverlay();
+  renderHexConfigOverlay();
 });
 
 Hooks.on("updateScene", (scene, changes) => {
@@ -149,4 +151,7 @@ window.CampaignMaster = {
       region:  getRegionAtPoint(x, y),
     };
   },
+
+  /** Grid offset → merged config { tags, tagsWithSource, encounter } */
+  getResolvedConfig(i, j) { return getResolvedConfig(i, j); },
 };
